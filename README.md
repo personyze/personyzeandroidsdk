@@ -3,7 +3,7 @@ This library allows you to use [Personyze system](https://www.personyze.com/) on
 
 ## How to get started with the Personyze Android SDK
 
-1. First you need to download the SDK files from [here](https://personyze.com/public/Personyze%20SDK/personyzeandroidsdk.zip).
+1. First you need to download the SDK files from [here](https://github.com/personyze/personyzeandroidsdk/archive/refs/heads/main.zip).
 2. Start Android Studio. This guide was using Android Studio version 3.3.2. Create new project. Select “Phone and Tablet” > “Empty Activity” and click “Next”.
 3. Enter desired project name, or leave as suggested and click “Finish”.
 4. Unzip the SDK. There must be directory called “personyzeandroidsdk”. Put it to the project root directory.
