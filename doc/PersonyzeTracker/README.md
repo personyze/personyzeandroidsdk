@@ -189,10 +189,10 @@ In these cases `action.renderOnWebView()` generates events, which are represente
 
 If you present an action in custom way (not through `action.renderOnWebView()`), still you are invited to report action events to Personyze by calling the following methods of PersonyzeAction object:
 
-- [action.reportClick()](../PersonyzeAction/README.md)
-- [action.reportClose()](../PersonyzeAction/README.md)
-- [action.reportProductClick()](../PersonyzeAction/README.md)
-- [action.reportArticleClick()](../PersonyzeAction/README.md)
+- [action.reportClick()](../PersonyzeAction/README.md#actionreportclick)
+- [action.reportClose()](../PersonyzeAction/README.md#actionreportclose)
+- [action.reportProductClick()](../PersonyzeAction/README.md#actionreportproductclick)
+- [action.reportArticleClick()](../PersonyzeAction/README.md#actionreportarticleclick)
 
 ### PersonyzeTracker.inst.getResult()
 

@@ -1,6 +1,8 @@
 # personyzeandroidsdk
 This library allows you to use [Personyze system](https://www.personyze.com/) on Android devices.
 
+See [reference manual](./doc/README.md).
+
 ## How to get started with the Personyze Android SDK
 
 1. First you need to download the SDK files from [here](https://github.com/personyze/personyzeandroidsdk/archive/refs/heads/main.zip).
