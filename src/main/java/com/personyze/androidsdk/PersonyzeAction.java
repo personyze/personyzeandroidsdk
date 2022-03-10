@@ -246,7 +246,12 @@ public class PersonyzeAction implements Serializable
 				webView.loadData("", "text/html", null); // otherwise addJavascriptInterface() will not be applied
 			}
 			webView.loadDataWithBaseURL(PersonyzeTracker.WEBVIEW_BASE_URL, html, "text/html; charset=utf-8", "utf-8", null);
+			reportExecuted();
 		}
+	}
+
+	public void reportExecuted()
+	{	PersonyzeTracker.inst.reportActionStatus(id, "executed", "");
 	}
 
 	public void reportClick()

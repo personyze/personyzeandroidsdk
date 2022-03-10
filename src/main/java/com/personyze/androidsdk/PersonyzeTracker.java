@@ -801,7 +801,21 @@ public class PersonyzeTracker
 	void reportActionStatus(int actionId, String status, String arg)
 	{	if (actionId>0 && status!=null && status.length()>0)
 		{	synchronized (this)
-			{	addCommand("Action Status", ""+actionId, status, arg);
+			{	String actionIdStr = ""+actionId;
+				// Already?
+				for (int i=commands.size()-1; i>=0; i--)
+				{	String[] command = commands.get(i);
+					if (command.length==2 && command[0]=="Navigate")
+					{	break;
+					}
+					if (command.length==4 && command[1]==actionIdStr && command[0]=="Action Status")
+					{	if (status=="executed" || status==command[2])
+						{	return; // yes, already reported
+						}
+					}
+				}
+				// Report
+				addCommand("Action Status", actionIdStr, status, arg);
 				if (status.equals("close"))
 				{	int nSessions = intVal(arg);
 					if (nSessions > 0)
@@ -810,6 +824,7 @@ public class PersonyzeTracker
 					}
 				}
 			}
+			flush(false, false, null);
 		}
 	}
 
@@ -1070,7 +1085,6 @@ public class PersonyzeTracker
 	public void reportActionClicked(PersonyzeAction.Clicked clicked)
 	{	if (clicked != null)
 		{	reportActionStatus(clicked.actionId, clicked.status, clicked.arg);
-			flush(false, false, null);
 		}
 	}
 

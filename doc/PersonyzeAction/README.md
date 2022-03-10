@@ -99,6 +99,14 @@ The `PersonyzeAction.Clicked` is dumb structure with the following fields:
 
 If you handle this click event, report to Personyze about it by calling [PersonyzeTracker.inst.reportActionClicked()](../PersonyzeTracker/README.md#personyzetrackerinstreportactionclicked), so Personyze will be able to show you CTR, close-rates, recommendation contribution value, and other statistics about how this action performs.
 
+### action.reportExecuted()
+
+```java
+void reportExecuted()
+```
+
+If you present this action in a custom way (not through `action.renderOnWebView()`), call this function after the action is shown to the user, so action statistics will be updated.
+
 ### action.reportClick()
 
 ```java
