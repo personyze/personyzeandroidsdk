@@ -3,6 +3,13 @@ This library allows you to use [Personyze system](https://www.personyze.com/) on
 
 See [reference manual](./doc/README.md).
 
+See also:
+
+- Personyze Android SDK
+- [Personyze Android SDK Demo app](https://github.com/personyze/personyzeandroidsdk-demo)
+- [Personyze iOS SDK](https://github.com/personyze/personyze-ios-sdk)
+- [Personyze iOS SDK Demo app](https://github.com/personyze/personyze-ios-sdk-demo)
+
 ## How to get started with the Personyze Android SDK
 
 1. First you need to download the SDK files from [here](https://github.com/personyze/personyzeandroidsdk/archive/refs/heads/main.zip).
