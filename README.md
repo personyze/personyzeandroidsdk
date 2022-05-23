@@ -13,25 +13,25 @@ See also:
 ## How to get started with the Personyze Android SDK
 
 1. First you need to download the SDK files from [here](https://github.com/personyze/personyzeandroidsdk/archive/refs/heads/main.zip).
-2. Start Android Studio. This guide was using Android Studio version 3.3.2. Create new project. Select “Phone and Tablet” > “Empty Activity” and click “Next”.
+2. Start Android Studio. This guide was using Android Studio version 2021.2.1. Create new project. Select “Phone and Tablet” > “Empty Activity” and click “Next”.
 3. Enter desired project name, or leave as suggested and click “Finish”.
 4. Unzip the SDK. There must be directory called “personyzeandroidsdk”. Put it to the project root directory.
 5. In the Project window on the left, where project files are listed, notice “Gradle Scripts”, expand it and edit the “settings.gradle” file.
 
-It's initial content looks like this:
+Initially this file ends with such line:
 
 ```gradle
 include ':app'
 ```
 
-Change to:
+Change this line to:
 
 ```gradle
 include ':app', ':personyzeandroidsdk'
 ```
 
 6. The IDE will prompt to sync the file. Click “Sync Now”.
-7. Find “app/build.gradle” file. This file starts with this line: “apply plugin: 'com.android.application'”. In the “dependencies” section add this line:
+7. Find “app/build.gradle” file. This file starts with this line: “plugins { id 'com.android.application' }”. In the “dependencies” section add this line:
 
 ```gradle
 implementation project(path: ':personyzeandroidsdk')
