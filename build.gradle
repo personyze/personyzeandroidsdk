@@ -1,0 +1,26 @@
+apply plugin: 'com.android.library'
+
+android {
+    namespace 'com.personyze.personyzeandroidsdk'
+
+    compileSdk 33
+
+
+
+    defaultConfig {
+        minSdkVersion 15
+        targetSdkVersion 33
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+    }
+
+}
+
+dependencies {
+    implementation 'eu.the4thfloor.volley:com.android.volley:2015.05.28'
+}
