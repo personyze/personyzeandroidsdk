@@ -6,6 +6,7 @@ import android.util.Log;
 
 import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.Objects;
 import java.util.Set;
 
 public class PersonyzeResult
@@ -41,7 +42,7 @@ public class PersonyzeResult
 				{	action.dataFromStorage(context);
 				}
 				catch (Exception e)
-				{	Log.e("Personyze", e.getLocalizedMessage());
+				{	Log.e("Personyze", Objects.requireNonNull(e.getLocalizedMessage()));
 				}
 				actions.add(action);
 			}

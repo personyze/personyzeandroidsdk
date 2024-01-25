@@ -7,6 +7,8 @@ import android.os.Looper;
 import android.webkit.JavascriptInterface;
 import android.webkit.WebView;
 
+import androidx.annotation.NonNull;
+
 import org.json.JSONArray;
 import org.json.JSONObject;
 import org.json.JSONTokener;
@@ -38,7 +40,7 @@ public class PersonyzeAction implements Serializable
 	String libsApp;
 	ArrayList<PersonyzePlaceholder> placeholders;
 
-	public class Clicked
+	public static class Clicked
 	{	public int actionId;
 		public String href;
 		public String status;
@@ -105,7 +107,9 @@ public class PersonyzeAction implements Serializable
 	void dataToStorage(Context context) throws IOException
 	{	File file = new File(context.getCacheDir(), "Personyze Action Data "+id);
 		if (data != null)
-		{	new ObjectOutputStream(new FileOutputStream(file)).writeObject(data);
+		{	try (FileOutputStream s = new FileOutputStream(file))
+			{	new ObjectOutputStream(s).writeObject(data);
+			}
 		}
 		else if (file.exists() && !file.delete())
 		{	throw new IOException("Couldn't delete file");
@@ -124,11 +128,11 @@ public class PersonyzeAction implements Serializable
 	{	return id;
 	}
 
-	public String getName()
+	public @NonNull String getName()
 	{	return name==null ? "" : name;
 	}
 
-	public String getContentType()
+	public @NonNull String getContentType()
 	{	return contentType==null ? "" : contentType;
 	}
 
@@ -207,16 +211,16 @@ public class PersonyzeAction implements Serializable
 		return null;
 	}
 
-	public void renderOnWebView(WebView webView)
-	{	renderOnWebView(webView, null);
+	public void renderOnWebView(Context context, WebView webView)
+	{	renderOnWebView(context, webView, null);
 	}
 
-	public void renderOnWebView(WebView webView, final PersonyzeTracker.Async<Clicked> asyncClicked)
+	public void renderOnWebView(Context context, WebView webView, final PersonyzeTracker.Callback<Clicked> callbackClicked)
 	{	final String html = getContentHtmlDoc();
 		if (html != null)
 		{	final int actionId = id;
 			webView.getSettings().setJavaScriptEnabled(true);
-			if (asyncClicked != null)
+			if (callbackClicked != null)
 			{	webView.removeJavascriptInterface("personyze_message_handler");
 				webView.addJavascriptInterface
 				(	new PersonyzeMessageHandler()
@@ -231,7 +235,7 @@ public class PersonyzeAction implements Serializable
 								new Handler(Looper.getMainLooper()).post
 								(	new Runnable()
 									{	@Override public void run()
-										{	asyncClicked.callback(clicked);
+										{	callbackClicked.callback(clicked);
 										}
 									}
 								);
@@ -246,39 +250,39 @@ public class PersonyzeAction implements Serializable
 				webView.loadData("", "text/html", null); // otherwise addJavascriptInterface() will not be applied
 			}
 			webView.loadDataWithBaseURL(PersonyzeTracker.WEBVIEW_BASE_URL, html, "text/html; charset=utf-8", "utf-8", null);
-			reportExecuted();
+			reportExecuted(context);
 		}
 	}
 
-	public void reportExecuted()
-	{	PersonyzeTracker.inst.reportActionStatus(id, "executed", "");
+	public void reportExecuted(Context context)
+	{	PersonyzeTracker.inst.reportActionStatus(context, id, "executed", "");
 	}
 
-	public void reportClick()
-	{	PersonyzeTracker.inst.reportActionStatus(id, "target", "");
+	public void reportClick(Context context)
+	{	PersonyzeTracker.inst.reportActionStatus(context, id, "target", "");
 	}
 
-	public void reportClose()
-	{	PersonyzeTracker.inst.reportActionStatus(id, "close", "0");
+	public void reportClose(Context context)
+	{	PersonyzeTracker.inst.reportActionStatus(context, id, "close", "0");
 	}
 
-	public void reportClose(int dontShowSessions)
-	{	PersonyzeTracker.inst.reportActionStatus(id, "close", ""+(dontShowSessions<0 ? 0 : dontShowSessions));
+	public void reportClose(Context context, int dontShowSessions)
+	{	PersonyzeTracker.inst.reportActionStatus(context, id, "close", ""+(dontShowSessions<0 ? 0 : dontShowSessions));
 	}
 
-	public void reportProductClick(String productId)
+	public void reportProductClick(Context context, String productId)
 	{	if (!productId.isEmpty())
-		{	PersonyzeTracker.inst.reportActionStatus(id, "product", productId);
+		{	PersonyzeTracker.inst.reportActionStatus(context, id, "product", productId);
 		}
 	}
 
-	public void reportArticleClick(String articleId)
+	public void reportArticleClick(Context context, String articleId)
 	{	if (!articleId.isEmpty())
-		{	PersonyzeTracker.inst.reportActionStatus(id, "article", articleId);
+		{	PersonyzeTracker.inst.reportActionStatus(context, id, "article", articleId);
 		}
 	}
 
-	public void reportError(String message)
-	{	PersonyzeTracker.inst.reportActionStatus(id, "error", message);
+	public void reportError(Context context, String message)
+	{	PersonyzeTracker.inst.reportActionStatus(context, id, "error", message);
 	}
 }
