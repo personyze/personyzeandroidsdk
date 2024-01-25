@@ -71,3 +71,7 @@ Use your API key instead of “0011223344556677889900112233445566778899”. API 
 The code above logs a navigation to page called “MainActivity”.
 
 You can look up this request on Personyze [Live Visits Dashboard](https://personyze.com/site/tracker/condition#cat=Dashboard%2FReal%20time%20visitors). In filters, select “Pages” → “only containing” → “MainActivity”.
+
+## Receiving notifications
+
+See [this guide](./doc/guides/noti/README.md).
