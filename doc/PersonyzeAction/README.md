@@ -61,8 +61,8 @@ Or just use `action.renderOnWebView()` (see below).
 ### action.renderOnWebView()
 
 ```java
-void renderOnWebView(WebView webView)
-void renderOnWebView(WebView webView, final PersonyzeTracker.Async<Clicked> asyncClicked)
+void renderOnWebView(Context context, WebView webView)
+void renderOnWebView(Context context, WebView webView, final PersonyzeTracker.Callback<Clicked> callbackClicked)
 ```
 
 If the MIME type of the action is “text/html”, this method renders the HTML on a provided WebView component. It uses `action.getContentHtmlDoc()` to get the HTML, calls `webView.getSettings().setJavaScriptEnabled(true)` to allow javascript, and installs click event handlers, that allow you to react on things clicked inside the HTML document.
@@ -77,15 +77,14 @@ Here is typical usage example:
 
 ```java
 action.renderOnWebView
-(	webView,
-	new PersonyzeTracker.Async<PersonyzeAction.Clicked>()
-	{	@Override public void callback(final PersonyzeAction.Clicked clicked)
-		{	// Got event. This means that you clicked some sensitive region
-			// I report this event to Personyze. So there will be CTR and close-rate statistics, and widget contribution rate (products bought from this action)
-			PersonyzeTracker.inst.reportActionClicked(clicked);
-			// Print out the information about this click
-			Log.w("Personyze", String.format("clicked=%s; arg=%s; href=%s", clicked.status, clicked.arg, clicked.href));
-		}
+(	context,
+	webView,
+	clicked ->
+	{	// Got event. This means that you clicked some sensitive region
+		// I report this event to Personyze. So there will be CTR and close-rate statistics, and widget contribution rate (products bought from this action)
+		PersonyzeTracker.inst.reportActionClicked(context, clicked);
+		// Print out the information about this click
+		Log.w("Personyze", String.format("clicked=%s; arg=%s; href=%s", clicked.status, clicked.arg, clicked.href));
 	}
 );
 ```
@@ -102,7 +101,7 @@ If you handle this click event, report to Personyze about it by calling [Persony
 ### action.reportExecuted()
 
 ```java
-void reportExecuted()
+void reportExecuted(Context context)
 ```
 
 If you present this action in a custom way (not through `action.renderOnWebView()`), call this function after the action is shown to the user, so action status will be changed to “executed” in Personyze dashboard, and execution statistics will be counted.
@@ -110,7 +109,7 @@ If you present this action in a custom way (not through `action.renderOnWebView(
 ### action.reportClick()
 
 ```java
-void reportClick()
+void reportClick(Context context)
 ```
 
 If you present this action in a custom way (not through `action.renderOnWebView()`), and this action is considered “clickable”, call this method to report to Personyze that it was clicked. Later Personyze will show you CTR (percent of clicked per shown) statistics that will indicate the performance of this action.
@@ -118,8 +117,8 @@ If you present this action in a custom way (not through `action.renderOnWebView(
 ### action.reportClose()
 
 ```java
-void reportClose()
-void reportClose(int dontShowSessions)
+void reportClose(Context context)
+void reportClose(Context context, int dontShowSessions)
 ```
 
 If you present this action in a custom way (not through `action.renderOnWebView()`), and this action is considered “closable”, call this method when you dismiss the action content from the screen __as the result of user's intent to close__ it (the user doesn't want to see it). Later Personyze will show you close-rate (percent of closed per shown) statistics that will indicate the performance of this action.
@@ -129,7 +128,7 @@ If you present this action in a custom way (not through `action.renderOnWebView(
 ### action.reportProductClick()
 
 ```java
-void reportProductClick(String productId)
+void reportProductClick(Context context, String productId)
 ```
 
 If you present this action in a custom way (not through `action.renderOnWebView()`), and this action is showing product recommendations, call this method to report user's click on certain product. Later Personyze will show you contribution rate of this action and other statistics.
@@ -139,13 +138,13 @@ If you present this action in a custom way (not through `action.renderOnWebView(
 ### action.reportArticleClick()
 
 ```java
-void reportArticleClick(String articleId)
+void reportArticleClick(Context context, String articleId)
 ```
 
 ### action.reportError()
 
 ```java
-void reportError(String message)
+void reportError(Context context, String message)
 ```
 
 If something went wrong with presenting this action to the user, it's recommended to call this method. This will set Personyze state of this action to “not executed”, and you will see the error message in Live Visits dashboard in the Personyze panel.
