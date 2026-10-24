@@ -1,8 +1,9 @@
-.directory
-/.idea
-/.gradle
-/gradlew
-/gradlew.bat
-/gradle
-/build
-/local.properties
+build/
+.gradle/
+.kotlin/
+local.properties
+.idea/
+*.iml
+captures/
+*.jks
+*.keystore
