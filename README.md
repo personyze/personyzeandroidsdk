@@ -209,7 +209,9 @@ FirebaseMessaging.getInstance().token.addOnSuccessListener { Personyze.setPushTo
 ```
 
 `handlePushMessage` shows the notification as a checked one is shown, reports it shown, and answers
-false for a message that is not Personyze's. The SDK registers the device with Personyze for the
+false for a message that is not Personyze's. Firebase Messaging 26 marks `onNewToken` and `getToken()`
+deprecated in favour of `register()`, which names the device by its installation id instead; Personyze
+sends to the registration token, and those calls still work. The SDK registers the device with Personyze for the
 current visitor, again after a login or a logout, and takes it off when the notifications are turned
 off or the visitor is reset. Once Personyze pushes to the device, the background check runs every 6
 hours instead of 15 minutes; a push that does not go is still shown at the app's next check.
