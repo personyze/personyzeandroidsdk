@@ -42,6 +42,10 @@ internal class FakePlatform(private val scheduler: TestCoroutineScheduler) : Pla
 	{	outboxScheduled++
 	}
 
+	/**	The app push is registered for; null (the default) where a test has none. **/
+	var app: PushApp? = null
+	override fun pushApp(): PushApp? = app
+
 	override fun log(message: String)
 	{	logs.add(message)
 	}

@@ -33,10 +33,13 @@ internal object WorkScheduling
 			null
 		}
 
-	fun scheduleNotifications(context: Context, enabled: Boolean)
+	/**	Every [everyMinutes] (WorkManager's least is 15): 15 while the app checks for its notifications,
+		6 hours when Personyze pushes them and the check is only the fallback.
+	 **/
+	fun scheduleNotifications(context: Context, enabled: Boolean, everyMinutes: Long)
 	{	val wm = workManager(context) ?: return
 		if (enabled)
-		{	val request = PeriodicWorkRequestBuilder<PersonyzeNotificationWorker>(15, TimeUnit.MINUTES).setConstraints(CONNECTED).build()
+		{	val request = PeriodicWorkRequestBuilder<PersonyzeNotificationWorker>(everyMinutes.coerceAtLeast(15), TimeUnit.MINUTES).setConstraints(CONNECTED).build()
 			wm.enqueueUniquePeriodicWork(NOTIFICATIONS, ExistingPeriodicWorkPolicy.UPDATE, request)
 		}
 		else

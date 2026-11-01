@@ -1,5 +1,18 @@
 # Changelog
 
+## 2.1.0 - not released yet
+
+- Notifications are reported: shown when posted, clicked when the notification or one of its buttons
+  is tapped - the campaign's statistics count them as they count a website's push. A tap passes
+  through a small invisible activity the SDK's manifest declares; a report that cannot go at once
+  goes with the next notification check.
+- Pushed through Firebase Cloud Messaging, when the account has uploaded its service account:
+  `setPushToken` and `handlePushMessage`, called from the app's own `FirebaseMessagingService` (the SDK
+  depends on no Firebase library). Once pushed to, the background check runs every 6 hours.
+- Notifications are checked as the app comes to the front too, once a minute at most - before, only
+  in the background every 15 minutes.
+- `PersonyzeApi` gains `setPushToken` and `handlePushMessage`.
+
 ## 2.0.0 - 2026-10-24
 
 A new SDK in Kotlin, replacing the 1.x Java SDK. Every 1.x feature is kept; the API is new - see the

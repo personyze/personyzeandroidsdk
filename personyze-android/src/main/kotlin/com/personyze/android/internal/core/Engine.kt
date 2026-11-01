@@ -28,6 +28,9 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import java.security.MessageDigest
 import kotlin.random.Random
 
@@ -81,6 +84,10 @@ internal class Engine
 	private val metaPersistLock = Any()
 	private val wire = Mutex()
 	private val meta = Mutex()
+	/**	One pass over the notification reports at a time, so none goes twice. **/
+	private val reportWire = Mutex()
+	/**	One push registration at a time. **/
+	private val pushWire = Mutex()
 	private val loaded = CompletableDeferred<Unit>()
 
 	// Guarded by `lock`.
@@ -715,6 +722,10 @@ internal class Engine
 		if (needsMetadata())
 		{	scope.launch(io) { fetchMetadata(config.backgroundTimeoutMs) }
 		}
+		// The visitor may be new to Personyze, or another: the device registered for them.
+		if (synchronized(lock) { state.push.token != null })
+		{	scope.launch(io) { registerPush() }
+		}
 	}
 
 	/**	Nothing reached Personyze: the events stay queued for when it can, a navigation does not. **/
@@ -798,11 +809,16 @@ internal class Engine
 
 	suspend fun reset(): Unit = withContext(io) {
 		loaded.await()
+		// The forgotten visitor's notifications reach this device no more; the new visitor registers it again.
+		val push = synchronized(lock) { state.push }
+		if (push.token != null && push.registered != null)
+		{	rest.call("PUT", Endpoints.PUSH_TOKEN, buildJsonObject { put("token", push.token); put("enabled", false) }.toString(), config.backgroundTimeoutMs)
+		}
 		wire.withLock {
 			meta.withLock {
 				synchronized(lock) {
 					installVisitor = Random.nextInt(MIN_ANONYMOUS_ID, Int.MAX_VALUE)
-					state = PersistedState(apiKeyFp = apiKeyFp)
+					state = PersistedState(apiKeyFp = apiKeyFp, push = PersistedPush(token = push.token))
 					pending.clear()
 					metadata = MetadataFile(apiKeyFp = apiKeyFp)
 					emitLocked()
@@ -911,13 +927,24 @@ internal class Engine
 
 	/**	Fetch the visitor's queued notification. Answers it when it is to be shown - not shown
 		before to this visitor - and marks it shown first, so a crash while posting cannot repeat it.
+
+		How often (SPEC section 11): [force] at once; as the app comes to the front ([foreground])
+		once a minute at most - the visitor is there to see it; otherwise, in the background, every
+		15 minutes, or every 6 hours when Personyze pushes to the device - the check is then only the
+		fallback for a push that did not go.
 	 **/
-	suspend fun pollNotification(force: Boolean): PersonyzeNotification? = withContext(io) {
+	suspend fun pollNotification(force: Boolean, foreground: Boolean = false): PersonyzeNotification? = withContext(io) {
 		loaded.await()
 		val now = platform.nowMs()
 		val request = synchronized(lock) {
 			val n = state.notifications
-			if (!force && now < n.lastCheckMs + NOTIFICATION_INTERVAL_MS - 60_000)
+			val interval = when
+			{	force -> 0L
+				foreground -> FOREGROUND_CHECK_MS
+				state.push.active -> PUSHED_CHECK_MS
+				else -> NOTIFICATION_INTERVAL_MS - 60_000
+			}
+			if (now < n.lastCheckMs + interval)
 			{	return@withContext null
 			}
 			// No request yet, no visitor on the server, nothing queued for one.
@@ -946,6 +973,149 @@ internal class Engine
 		}
 		persistNow()
 		if (show) notification else null
+	}
+
+	/**	How long the background may wait before it checks again, in minutes: longer when Personyze
+		pushes to the device.
+	 **/
+	fun backgroundCheckMinutes(): Long = synchronized(lock) { if (state.push.active) PUSHED_CHECK_MS else NOTIFICATION_INTERVAL_MS } / 60_000
+
+	/**	The token Firebase gave the install, as the app passes it on (null: none any more).
+		Registered as soon as there is a visitor to register it for.
+	 **/
+	fun setPushToken(token: String?)
+	{	mutate {
+			if (token != state.push.token)
+			{	state = state.copy(push = state.push.copy(token = token))
+				persistSoon()
+			}
+		}
+		scope.launch(io) { registerPush() }
+	}
+
+	/**	Tell Personyze which device this visitor's notifications can be pushed to (SPEC section 11,
+		`PUT push_token`) - when there is something new to tell: a token, a visitor (a login, a
+		logout, a reset), or a week since the last time. Where the notifications cannot be shown
+		any more (turned off in the app or by the user), the device is taken off instead. Best
+		effort: what fails is tried again at the next chance - a response, a check, the app's
+		return to the front.
+	 **/
+	suspend fun registerPush(): Unit = withContext(io) {
+		loaded.await()
+		val app = platform.pushApp() ?: return@withContext
+		pushWire.withLock {
+			val now = platform.nowMs()
+			val showable = platform.notificationsShowable()
+			val job: Pair<JsonObject, String?> = synchronized(lock) {
+				val p = state.push
+				val token = p.token ?: return@withLock
+				if (!showable)
+				{	if (p.registered == null)
+					{	return@withLock
+					}
+					buildJsonObject { put("token", token); put("enabled", false) } to null
+				}
+				else
+				{	state.session ?: return@withLock
+					val visitor = Session.serverUserId(userValue(currentUserLocked())) ?: return@withLock
+					val signature = "$visitor $token"
+					if (p.registered == signature && now < p.registeredAtMs + PUSH_REGISTER_AGAIN_MS)
+					{	return@withLock
+					}
+					buildJsonObject {
+						put("user_id", visitor)
+						put("token", token)
+						put("platform", app.platform)
+						put("app_id", app.appId)
+						put("sandbox", app.sandbox)
+						put("enabled", true)
+					} to signature
+				}
+			}
+			when (val outcome = rest.call("PUT", Endpoints.PUSH_TOKEN, job.first.toString(), config.backgroundTimeoutMs))
+			{	is RestResult.Ok ->
+				{	val active = job.second != null && Wire.bool((Wire.json.parseToJsonElement(outcome.body.ifBlank { "{}" }) as? JsonObject)?.get("push"))
+					synchronized(lock) {
+						state = state.copy(push = state.push.copy(registered = job.second, registeredAtMs = now, active = active))
+					}
+					persistSoon()
+				}
+				is RestResult.Failed -> platform.log("Personyze: the device could not be registered for push now: ${outcome.error.message}")
+			}
+		}
+	}
+
+	/**	A notification Personyze pushed, as the app's Firebase service passed it on: whether to show
+		it - not shown before to this visitor, by a check or an earlier push - marked shown first, as
+		[pollNotification] marks a checked one.
+	 **/
+	suspend fun acceptPushed(notification: PersonyzeNotification): Boolean = withContext(io) {
+		loaded.await()
+		val show = synchronized(lock) {
+			val visitor = Session.serverUserId(userValue(currentUserLocked()))?.toString() ?: return@synchronized true
+			val n = state.notifications
+			if (n.delivered[visitor] == notification.messageId)
+			{	false
+			}
+			else
+			{	val delivered = (n.delivered - visitor) + (visitor to notification.messageId)
+				state = state.copy(notifications = n.copy(delivered = delivered.entries.toList().takeLast(DELIVERED_KEPT).associate { it.key to it.value }))
+				true
+			}
+		}
+		persistNow()
+		show
+	}
+
+	/**	Report a notification shown, or tapped (SPEC section 11): fetch the address `GET
+		current_notification` answered with it. Written down first and taken off once the server has
+		had it, so a report the network or the process lost goes with the next notification check
+		([sendNotificationReports]). An empty address, or one that is not https, is nothing to report.
+	 **/
+	suspend fun reportNotification(address: String): Unit = withContext(io) {
+		if (!isReportUrl(address))
+		{	return@withContext
+		}
+		loaded.await()
+		synchronized(lock) {
+			val n = state.notifications
+			state = state.copy(notifications = n.copy(reports = (n.reports.filter { it != address } + address).takeLast(REPORTS_KEPT)))
+		}
+		persistNow()
+		sendNotificationReports()
+	}
+
+	/**	Send the notification reports not sent yet, oldest first, within the background budget.
+		Stops at the first that does not reach the server; the rest wait for the next check.
+	 **/
+	suspend fun sendNotificationReports(): Unit = withContext(io) {
+		loaded.await()
+		reportWire.withLock {
+			val addresses = synchronized(lock) { state.notifications.reports }
+			if (addresses.isEmpty())
+			{	return@withLock
+			}
+			val deadline = platform.monotonicMs() + config.backgroundTimeoutMs
+			val sent = HashSet<String>()
+			for (address in addresses)
+			{	val remaining = deadline - platform.monotonicMs()
+				if (remaining <= 0)
+				{	break
+				}
+				if (isReportUrl(address) && !rest.ping(address, remaining))
+				{	platform.log("Personyze: could not report the notification; trying again at the next check")
+					break
+				}
+				sent.add(address)
+			}
+			if (sent.isNotEmpty())
+			{	synchronized(lock) {
+					val n = state.notifications
+					state = state.copy(notifications = n.copy(reports = n.reports.filter { it !in sent }))
+				}
+				persistNow()
+			}
+		}
 	}
 
 	/**	Tell the server the message was delivered, so it leaves the queue. Best effort. **/
@@ -1111,8 +1281,19 @@ internal class Engine
 		const val METADATA_CHUNK = 200
 		const val NOTIFICATION_INTERVAL_MS = 15L*60_000
 		const val DELIVERED_KEPT = 20
+		/**	Notification reports not sent yet, kept until they are; the oldest go first past this. **/
+		const val REPORTS_KEPT = 10
+		/**	A check as the app comes to the front, at most this often. **/
+		const val FOREGROUND_CHECK_MS = 60_000L
+		/**	A background check where Personyze pushes to the device. **/
+		const val PUSHED_CHECK_MS = 6L*3600_000
+		/**	A device registered for push is registered again after this, so Personyze keeps it. **/
+		const val PUSH_REGISTER_AGAIN_MS = 7L*24*3600_000
 		const val CLOCK_SKEW_MS = 60_000L
 		const val MAX_SAFE_INTEGER = 9_007_199_254_740_991L
+
+		/**	A report's address as the server gave it, when it is one to fetch: https only. **/
+		fun isReportUrl(address: String): Boolean = address.toHttpUrlOrNull()?.isHttps == true
 
 		fun sha256(s: String): String =
 			MessageDigest.getInstance("SHA-256").digest(s.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }

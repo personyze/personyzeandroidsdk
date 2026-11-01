@@ -11,6 +11,7 @@ import android.util.Log
 import androidx.core.os.LocaleListCompat
 import com.personyze.android.internal.core.DeviceContext
 import com.personyze.android.internal.core.Platform
+import com.personyze.android.internal.core.PushApp
 import java.util.TimeZone
 
 internal class AndroidPlatform
@@ -39,6 +40,8 @@ internal class AndroidPlatform
 	override fun scheduleOutboxFlush()
 	{	WorkScheduling.scheduleOutbox(context)
 	}
+
+	override fun pushApp(): PushApp = PushApp("android", context.packageName, false)
 
 	override fun log(message: String)
 	{	Log.w(TAG, message)

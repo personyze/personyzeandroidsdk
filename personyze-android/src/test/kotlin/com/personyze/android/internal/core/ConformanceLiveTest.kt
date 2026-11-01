@@ -41,6 +41,7 @@ class ConformanceLiveTest
 		override fun notificationsShowable(): Boolean = false
 		override fun isOnline(): Boolean = true
 		override fun scheduleOutboxFlush() {}
+		override fun pushApp(): PushApp? = null
 		override fun log(message: String) = println(message)
 	}
 

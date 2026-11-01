@@ -10,14 +10,20 @@ import com.personyze.android.internal.core.Commands
 import com.personyze.android.internal.core.Engine
 import com.personyze.android.internal.core.EngineConfig
 import com.personyze.android.internal.core.FileStore
+import com.personyze.android.internal.core.NotificationPoll
 import com.personyze.android.internal.core.OkHttpTransport
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.OkHttpClient
 import java.io.File
+import java.util.concurrent.atomic.AtomicLong
 
 /**	Marks APIs meant for support and test screens, not for app logic. **/
 @RequiresOptIn(level = RequiresOptIn.Level.WARNING, message = "For diagnostics only; the format may change.")
@@ -33,6 +39,8 @@ public class PersonyzeClient internal constructor(context: Context, public val c
 	private val images = ImageLoader(http)
 
 	@Volatile internal var notificationsEnabled: Boolean = config.notifications
+	/**	The period the background check was last scheduled with, in minutes. **/
+	private val scheduledEveryMinutes = AtomicLong(Engine.NOTIFICATION_INTERVAL_MS / 60_000)
 	@Volatile internal var errorListener: PersonyzeErrorListener? = config.onError
 
 	internal val engine: Engine
@@ -169,21 +177,87 @@ public class PersonyzeClient internal constructor(context: Context, public val c
 
 	override suspend fun checkNotifications(): PersonyzeNotification? = checkNotifications(force = true)
 
-	internal suspend fun checkNotifications(force: Boolean): PersonyzeNotification?
-	{	if (!NotificationRenderer.canShow(appContext))
+	/**	Reports kept from before go first: a tap made offline, a report the process did not live to
+		send; and the device's push registration, when it has something new to say. A notification
+		posted is reported shown, and taken off the server's queue. [foreground]: the app has just
+		come to the front - checked once a minute at most (SPEC section 11).
+	 **/
+	internal suspend fun checkNotifications(force: Boolean, foreground: Boolean = false): PersonyzeNotification?
+	{	engine.sendNotificationReports()
+		engine.registerPush()
+		rescheduleIfPushChanged()
+		if (!NotificationRenderer.canShow(appContext))
 		{	return null
 		}
-		val n = engine.pollNotification(force) ?: return null
-		val shown = NotificationRenderer.show(appContext, n, images, config.notificationChannelName, config.notificationSmallIcon)
-		if (shown)
-		{	engine.ackNotification(n.messageId)
-		}
+		val n = engine.pollNotification(force, foreground) ?: return null
+		show(n, checked = true)
 		return n
+	}
+
+	/**	Draw it; drawn, report it shown - and a [checked] one is taken off the server's queue. A pushed
+		one is off it already: the server takes a message off as it pushes it.
+	 **/
+	private suspend fun show(n: PersonyzeNotification, checked: Boolean)
+	{	if (NotificationRenderer.show(appContext, n, images, config.notificationChannelName, config.notificationSmallIcon))
+		{	coroutineScope {
+				if (checked)
+				{	launch { engine.ackNotification(n.messageId) }
+				}
+				engine.reportNotification(n.shownUrl)
+			}
+		}
+	}
+
+	override fun setPushToken(token: String)
+	{	engine.setPushToken(token.trim().ifEmpty { null })
+		scope.launch {
+			engine.registerPush()
+			rescheduleIfPushChanged()
+		}
+	}
+
+	override fun handlePushMessage(data: Map<String, String>): Boolean
+	{	val json = data[PUSH_DATA_KEY] ?: return false
+		val n = NotificationPoll.parse(json) ?: return true
+		runBlocking {
+			withTimeoutOrNull(15_000) {
+				if (notificationsEnabled && NotificationRenderer.canShow(appContext) && engine.acceptPushed(n))
+				{	show(n, checked = false)
+				}
+			}
+		}
+		return true
+	}
+
+	/**	The app came to the front: the notifications are checked - once a minute at most. **/
+	internal fun onForeground()
+	{	if (notificationsEnabled)
+		{	scope.launch { checkNotifications(force = false, foreground = true) }
+		}
+	}
+
+	/**	The background check's period follows the push: 15 minutes, or 6 hours once Personyze pushes. **/
+	private fun rescheduleIfPushChanged()
+	{	val minutes = engine.backgroundCheckMinutes()
+		if (notificationsEnabled && scheduledEveryMinutes.getAndSet(minutes) != minutes)
+		{	WorkScheduling.scheduleNotifications(appContext, true, minutes)
+		}
+	}
+
+	/**	A tap on a notification, from [com.personyze.android.internal.android.NotificationTapActivity]:
+		reported while the app goes on to where the tap leads.
+	 **/
+	internal fun reportNotificationTap(address: String)
+	{	scope.launch { engine.reportNotification(address) }
 	}
 
 	override fun setNotificationsEnabled(enabled: Boolean)
 	{	notificationsEnabled = enabled
-		WorkScheduling.scheduleNotifications(appContext, enabled)
+		val minutes = engine.backgroundCheckMinutes()
+		scheduledEveryMinutes.set(minutes)
+		WorkScheduling.scheduleNotifications(appContext, enabled, minutes)
+		// Turned off, the device is taken off - Personyze stops pushing to it; turned on, it is registered again.
+		scope.launch { engine.registerPush() }
 	}
 
 	override suspend fun verdict(conditionId: Int): Result<PersonyzeVerdict> = engine.verdict(conditionId)
@@ -212,5 +286,7 @@ public class PersonyzeClient internal constructor(context: Context, public val c
 	private companion object
 	{	/**	One connection pool for every client in the process. **/
 		val sharedHttp: OkHttpClient by lazy { OkHttpClient() }
+		/**	The data key a Personyze push carries its notification under (app-service mod_app_push payload.ts). **/
+		const val PUSH_DATA_KEY = "personyze"
 	}
 }

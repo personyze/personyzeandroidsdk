@@ -170,10 +170,49 @@ ask for it at runtime on Android 13+, and turn them on:
 Personyze.initialize(this, PersonyzeConfig("YOUR_API_KEY") { notifications = true })
 ```
 
-The SDK checks every 15 minutes (WorkManager, in the background too) and shows what is queued, with
-its title, text, image, icon and up to three buttons; a tap opens the message's link. Each message
-appears once. `checkNotifications()` checks now. Notifications reach a visitor who matched the
-campaign's rules once their session has ended - typically 1.5 hours after they used the app.
+The SDK checks as the app comes to the front (once a minute at most) and every 15 minutes in the
+background (WorkManager), and shows what is queued, with its title, text, image, icon and up to three
+buttons; a tap opens the message's link. Each message appears once. `checkNotifications()` checks now.
+Notifications reach a visitor who matched the campaign's rules once their session has ended -
+typically 1.5 hours after they used the app.
+
+Since 2.1 the campaign's statistics count each notification shown and each tap on it or its buttons,
+as they count a website's push. A tap passes through a small invisible activity of the SDK's, which
+reports it and opens the link; nothing to declare, the SDK's manifest brings it.
+
+### Pushed at once (Firebase)
+
+With the account's Firebase service account uploaded in the Personyze panel (Integrations › App
+push), a campaign reaches the phone at once, even with the app closed, instead of at the app's next
+check. The app uses Firebase Cloud Messaging itself (the SDK depends on no Firebase library) and
+passes two things on - the device's token, and the messages:
+
+```kotlin
+class PushService : FirebaseMessagingService()
+{	override fun onNewToken(token: String)
+	{	Personyze.setPushToken(token)
+	}
+
+	override fun onMessageReceived(message: RemoteMessage)
+	{	if (Personyze.handlePushMessage(message.data))
+		{	return
+		}
+		// your own messages
+	}
+}
+```
+
+and once at start, after `initialize`:
+
+```kotlin
+FirebaseMessaging.getInstance().token.addOnSuccessListener { Personyze.setPushToken(it) }
+```
+
+`handlePushMessage` shows the notification as a checked one is shown, reports it shown, and answers
+false for a message that is not Personyze's. The SDK registers the device with Personyze for the
+current visitor, again after a login or a logout, and takes it off when the notifications are turned
+off or the visitor is reset. Once Personyze pushes to the device, the background check runs every 6
+hours instead of 15 minutes; a push that does not go is still shown at the app's next check.
 
 Many Android builds put apps in a battery saver that stops background work; a user may have to allow
 it for your app (libraries such as [AutoStarter](https://github.com/judemanutd/AutoStarter) open the

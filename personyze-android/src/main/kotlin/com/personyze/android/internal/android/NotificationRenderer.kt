@@ -108,9 +108,9 @@ internal object NotificationRenderer
 		if (n.vibrate.isNotEmpty())
 		{	builder.setVibrate(n.vibrate.toLongArray())
 		}
-		builder.setContentIntent(viewIntent(context, n.url, n.messageId, 0) ?: launchIntent(context, n.messageId))
+		builder.setContentIntent(tapIntent(context, n, n.url, 0, orApp = true))
 		n.buttons.forEachIndexed { i, button ->
-			val intent = viewIntent(context, button.url, n.messageId, i + 1) ?: return@forEachIndexed
+			val intent = tapIntent(context, n, button.url, i + 1, orApp = false) ?: return@forEachIndexed
 			val buttonIcon = bitmaps.getOrNull(3 + i)
 			val action = if (buttonIcon != null)
 				NotificationCompat.Action.Builder(IconCompat.createWithBitmap(buttonIcon), button.title, intent).build()
@@ -132,13 +132,37 @@ internal object NotificationRenderer
 	 **/
 	private fun requestCode(messageId: Long, slot: Int): Int = messageId.hashCode()*4 + slot
 
-	private fun viewIntent(context: Context, url: String, messageId: Long, slot: Int): PendingIntent?
+	/**	What a tap opens: [url] when it is an address to open; else the app for the notification
+		itself ([orApp]), nothing for a button. Through [NotificationTapActivity] when the notification
+		has a tap to report (`click_url`), straight there when not.
+	 **/
+	private fun tapIntent(context: Context, n: PersonyzeNotification, url: String, slot: Int, orApp: Boolean): PendingIntent?
+	{	val target = openable(url)
+		if (target == null && !orApp)
+		{	return null
+		}
+		if (n.clickUrl.isEmpty())
+		{	return if (target != null) viewIntent(context, target, n.messageId, slot) else launchIntent(context, n.messageId)
+		}
+		val intent = Intent(context, NotificationTapActivity::class.java)
+			.putExtra(NotificationTapActivity.EXTRA_TARGET, target?.toString().orEmpty())
+			.putExtra(NotificationTapActivity.EXTRA_REPORT, n.clickUrl)
+			.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+		return PendingIntent.getActivity(context, requestCode(n.messageId, slot), intent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+	}
+
+	/**	An address a tap may open: not a file, content or script. **/
+	private fun openable(url: String): Uri?
 	{	val uri = url.takeIf { it.isNotBlank() }?.let { Uri.parse(it) } ?: return null
 		val scheme = uri.scheme?.lowercase() ?: return null
 		if (scheme == "file" || scheme == "content" || scheme == "javascript")
 		{	return null
 		}
-		val intent = Intent(Intent.ACTION_VIEW, uri).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+		return uri
+	}
+
+	private fun viewIntent(context: Context, uri: Uri, messageId: Long, slot: Int): PendingIntent?
+	{	val intent = Intent(Intent.ACTION_VIEW, uri).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
 		return PendingIntent.getActivity(context, requestCode(messageId, slot), intent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
 	}
 

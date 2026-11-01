@@ -21,8 +21,21 @@ internal interface Platform
 	/**	Have queued events sent later, when the network is back - WorkManager on Android. **/
 	fun scheduleOutboxFlush()
 
+	/**	The app as a push service knows it, or null where there is no push. **/
+	fun pushApp(): PushApp?
+
 	fun log(message: String)
 }
+
+/**	The app a device token is for (SPEC section 11): what `PUT push_token` sends with it. **/
+internal data class PushApp
+(	/**	"android" or "ios". **/
+	val platform: String,
+	/**	The package name. **/
+	val appId: String,
+	/**	An iOS development build, whose token only Apple's sandbox serves; false on Android. **/
+	val sandbox: Boolean
+)
 
 /**	A v1 install's state, read once from its SharedPreferences. **/
 internal class LegacyState

@@ -8,14 +8,20 @@ import android.os.Bundle
 	process can be frozen or killed. A flush started in the process at that moment could be frozen
 	mid-request (Android 14's cached-app freezer), turning a clean send into one that may or may not
 	have arrived.
+
+	And when its first activity starts - the app has come to the front: the notifications are checked
+	then (SPEC section 11), the visitor being there to see one. Android checked only every 15 minutes
+	in the background until 2.1.
  **/
 internal object AppForeground
 {	@Volatile private var installed = false
+	@Volatile private var onForeground: () -> Unit = {}
 	@Volatile private var onBackground: () -> Unit = {}
 	private var started = 0
 
-	fun install(app: Application, callback: () -> Unit)
-	{	onBackground = callback
+	fun install(app: Application, onForeground: () -> Unit, onBackground: () -> Unit)
+	{	this.onForeground = onForeground
+		this.onBackground = onBackground
 		if (installed)
 		{	return
 		}
@@ -23,12 +29,15 @@ internal object AppForeground
 		app.registerActivityLifecycleCallbacks(object : Application.ActivityLifecycleCallbacks
 		{	override fun onActivityStarted(activity: Activity)
 			{	started++
+				if (started == 1)
+				{	AppForeground.onForeground()
+				}
 			}
 
 			override fun onActivityStopped(activity: Activity)
 			{	started = (started - 1).coerceAtLeast(0)
 				if (started == 0 && !activity.isChangingConfigurations)
-				{	onBackground()
+				{	AppForeground.onBackground()
 				}
 			}
 

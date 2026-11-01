@@ -36,6 +36,7 @@ internal class RestClient
 		"Accept" to "application/json",
 		"User-Agent" to userAgent
 	)
+	private val pingHeaders = mapOf("User-Agent" to userAgent)
 
 	/**	A server message that echoes the key must not carry it into a log (SPEC section 2). **/
 	private fun redact(text: String): String = if (apiKey.length >= 8) text.replace(apiKey, "***", ignoreCase = true) else text
@@ -81,6 +82,26 @@ internal class RestClient
 			}
 		}
 		return RestResult.Failed(lastError ?: PersonyzeException.Transport(null, Kind.TIMEOUT, "Personyze did not answer within ${budgetMs}ms"), maybeDelivered)
+	}
+
+	/**	A GET of an address the server handed out - a notification's report, on the media host (SPEC
+		section 11) - without the API key, which goes to `/rest` only. Answers whether the server had
+		it: an answer below 500, whatever it says. Retried as [call] is: once, for a connection
+		failure, a timeout or a 5xx, while a tenth of the budget is left.
+	 **/
+	suspend fun ping(url: String, budgetMs: Long): Boolean
+	{	val deadline = monotonicMs() + budgetMs
+		for (attempt in 0..retries)
+		{	val remaining = deadline - monotonicMs()
+			if (remaining <= 0 || attempt > 0 && remaining < budgetMs/10)
+			{	break
+			}
+			when (val outcome = transport.execute(HttpRequest("GET", url, pingHeaders, null), remaining))
+			{	is HttpOutcome.Answered -> if (outcome.status < 500) return true
+				is HttpOutcome.Failed -> if (outcome.offline) return false
+			}
+		}
+		return false
 	}
 
 	private fun describe(e: Throwable?): String = redact(e?.let { it.message ?: it.javaClass.simpleName } ?: "unknown error")

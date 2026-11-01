@@ -6,7 +6,8 @@ import kotlinx.serialization.json.JsonObject
 
 /**	`GET current_notification` answers `null` or one queued message (app-service
 	`mod_rest/handlers/current_notification.ts`), put there by a "Web Push Send" action for a visitor
-	whose requests said `noti_enabled`.
+	whose requests said `noti_enabled`. With it, since 2026-10-31, the two addresses the SDK reports
+	it with - shown, and tapped; a server or a send from before them answers neither.
  **/
 internal object NotificationPoll
 {	fun parse(text: String): PersonyzeNotification?
@@ -43,7 +44,9 @@ internal object NotificationPoll
 			buttons = buttons,
 			silent = Wire.bool(obj["silent"]),
 			renotify = Wire.bool(obj["renotify"]),
-			vibrate = Wire.string(obj["vibrate"]).split(',').mapNotNull { it.trim().toLongOrNull()?.takeIf { ms -> ms >= 0 } }
+			vibrate = Wire.string(obj["vibrate"]).split(',').mapNotNull { it.trim().toLongOrNull()?.takeIf { ms -> ms >= 0 } },
+			shownUrl = Wire.string(obj["shown_url"]).trim(),
+			clickUrl = Wire.string(obj["click_url"]).trim()
 		)
 	}
 }

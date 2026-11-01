@@ -20,7 +20,7 @@ internal class PersonyzeNotificationWorker(context: Context, params: WorkerParam
 			return Result.success()
 		}
 		if (!client.notificationsEnabled)
-		{	WorkScheduling.scheduleNotifications(applicationContext, false)
+		{	WorkScheduling.scheduleNotifications(applicationContext, false, 0)
 			return Result.success()
 		}
 		client.checkNotifications(force = false)

@@ -16,7 +16,13 @@ public class PersonyzeNotification internal constructor
 	public val silent: Boolean,
 	public val renotify: Boolean,
 	/**	Vibration pattern in milliseconds. **/
-	public val vibrate: List<Long>
+	public val vibrate: List<Long>,
+	/**	Where the SDK reports the notification shown (the server's `shown_url`), or empty: nothing to
+		report with.
+	 **/
+	internal val shownUrl: String = "",
+	/**	Where the SDK reports a tap on it or one of its buttons (`click_url`), or empty. **/
+	internal val clickUrl: String = ""
 )
 {	public class Button internal constructor
 	(	public val title: String,

@@ -11,8 +11,12 @@ import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.put
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -650,6 +654,153 @@ class EngineTest
 		h.transport.on("/rest/current_notification/", ok("""{"message_id":5,"title":"T","body":"B"}"""), ok("""{"message_id":6,"title":"T","body":"B"}"""))
 		assertNull(h.engine.pollNotification(force = true))
 		assertEquals(6L, h.engine.pollNotification(force = true)?.messageId)
+	}
+
+	/**	A report goes to the address the server gave, as it is, and without the API key: the key goes
+		to `/rest` only.
+	 **/
+	@Test fun notificationReportGoesWithoutTheKey() = runTest {
+		val h = harness()
+		h.transport.on("/white/", ok(""))
+		h.engine.reportNotification("https://pic.test/white/k=d57hr0hy9dp2/u=7/extra=1?p=p%2F1")
+		val request = h.transport.requests.last()
+		assertEquals("GET", request.method)
+		assertEquals("https://pic.test/white/k=d57hr0hy9dp2/u=7/extra=1?p=p%2F1", request.url)
+		assertNull(request.headers["Authorization"])
+		assertEquals("personyze-android/test", request.headers["User-Agent"])
+		h.engine.sendNotificationReports()
+		assertEquals("sent, so not kept", 1, h.transport.requests.size)
+	}
+
+	@Test fun nothingToReportWithIsNotSent() = runTest {
+		val h = harness()
+		h.engine.reportNotification("")
+		h.engine.reportNotification("http://pic.test/white/k=d57hr0hy9dp2/u=7")
+		h.engine.reportNotification("javascript:alert(1)")
+		assertTrue(h.transport.requests.isEmpty())
+	}
+
+	/**	A report the server did not get is kept - on disk, so a new process sends it too - and goes
+		with the next check. Any answer below 500 is the server's: a 4xx is not sent again.
+	 **/
+	@Test fun aReportThatCannotGoNowGoesWithTheNextCheck() = runTest {
+		val store = MemoryStore()
+		val first = harness(store = store)
+		first.transport.on("/white/", fail(sent = false))
+		first.engine.reportNotification("https://pic.test/white/k=d57hr0hy9dp2/u=7")
+		assertEquals("tried, and retried once", 2, first.transport.requests.size)
+		advanceUntilIdle()
+		assertTrue("a report is not an error the app hears of", first.errors.isEmpty())
+
+		val second = harness(store = store)
+		second.transport.on("/white/", status(404))
+		second.engine.sendNotificationReports()
+		assertEquals(listOf("https://pic.test/white/k=d57hr0hy9dp2/u=7"), second.transport.requests.map { it.url })
+		second.engine.sendNotificationReports()
+		assertEquals(1, second.transport.requests.size)
+	}
+
+	// ------------------------------------------------------------------------- push (SPEC section 11)
+
+	private fun TestScope.pushHarness(answer: String = """{"push":true}"""): Harness
+	{	val (h, _) = trackerHarness()
+		h.platform.app = PushApp("android", "com.shop.app", false)
+		h.platform.showable = true
+		h.transport.on("/rest/push_token", ok(answer))
+		return h
+	}
+
+	private fun pushBodies(h: Harness): List<JsonObject> =
+		h.transport.requests.filter { it.url.endsWith("/rest/push_token") }.map { Wire.json.parseToJsonElement(it.body!!).jsonObject }
+
+	/**	Registered once there is a visitor on the server, with the app - and again only when there is
+		something new to say, or a week on.
+	 **/
+	@Test fun pushTokenIsRegisteredForTheVisitor() = runTest {
+		val h = pushHarness()
+		h.engine.setPushToken("dev:abc")
+		advanceUntilIdle()
+		assertTrue("no visitor yet", pushBodies(h).isEmpty())
+		h.engine.navigate("Home", null)
+		advanceUntilIdle()
+		val visitor = h.engine.visitor.value.visitorId!!
+		assertEquals(listOf(buildJsonObject { put("user_id", visitor); put("token", "dev:abc"); put("platform", "android"); put("app_id", "com.shop.app"); put("sandbox", false); put("enabled", true) }), pushBodies(h))
+		assertEquals("PUT", h.transport.requests.last().method)
+		assertEquals("pushed: the background checks are few", 360L, h.engine.backgroundCheckMinutes())
+		h.engine.registerPush()
+		assertEquals("nothing new to say", 1, pushBodies(h).size)
+		h.platform.wallBase += 8L*24*3600_000
+		h.engine.registerPush()
+		assertEquals("a week on", 2, pushBodies(h).size)
+	}
+
+	/**	Without a key for the platform the device is still registered - a key added later finds it -
+		and the app goes on checking every 15 minutes.
+	 **/
+	@Test fun withoutAKeyTheChecksStayAsTheyWere() = runTest {
+		val h = pushHarness("""{"push":false}""")
+		h.engine.setPushToken("dev:abc")
+		h.engine.navigate("Home", null)
+		advanceUntilIdle()
+		assertEquals(1, pushBodies(h).size)
+		assertEquals(15L, h.engine.backgroundCheckMinutes())
+	}
+
+	@Test fun notificationsTurnedOffTakeTheDeviceOff() = runTest {
+		val h = pushHarness()
+		h.engine.setPushToken("dev:abc")
+		h.engine.navigate("Home", null)
+		advanceUntilIdle()
+		h.platform.showable = false
+		h.engine.registerPush()
+		assertEquals(buildJsonObject { put("token", "dev:abc"); put("enabled", false) }, pushBodies(h).last())
+		assertEquals(15L, h.engine.backgroundCheckMinutes())
+		h.engine.registerPush()
+		assertEquals("off once", 2, pushBodies(h).size)
+	}
+
+	/**	The forgotten visitor's notifications reach the device no more; the new visitor registers it. **/
+	@Test fun resetTakesTheOldVisitorOffAndKeepsTheToken() = runTest {
+		val h = pushHarness()
+		h.engine.setPushToken("dev:abc")
+		h.engine.navigate("Home", null)
+		advanceUntilIdle()
+		val before = h.engine.visitor.value.visitorId
+		h.engine.reset()
+		assertEquals(buildJsonObject { put("token", "dev:abc"); put("enabled", false) }, pushBodies(h).last())
+		h.engine.navigate("Home", null)
+		advanceUntilIdle()
+		val after = h.engine.visitor.value.visitorId!!
+		assertTrue(before != after)
+		assertEquals(JsonPrimitive(after), pushBodies(h).last()["user_id"])
+		assertEquals(3, pushBodies(h).size)
+	}
+
+	/**	A pushed notification is shown once; the app's own check does not show it again. **/
+	@Test fun aPushedNotificationIsShownOnce() = runTest {
+		val h = pushHarness()
+		h.transport.on("/rest/current_notification/", ok("""{"message_id":5,"title":"T","body":"B"}"""))
+		h.engine.navigate("Home", null)
+		val pushed = NotificationPoll.parse("""{"message_id":5,"title":"T","body":"B"}""")!!
+		assertTrue(h.engine.acceptPushed(pushed))
+		assertFalse("pushed twice", h.engine.acceptPushed(pushed))
+		assertNull("the check finds the same", h.engine.pollNotification(force = true))
+	}
+
+	/**	As the app comes to the front the visitor is there to see one: checked, but once a minute at most. **/
+	@Test fun foregroundChecksAreOnceAMinute() = runTest {
+		val (h, _) = trackerHarness()
+		h.transport.on("/rest/current_notification/", ok("null"))
+		h.engine.navigate("Home", null)
+		val checks = { h.transport.requests.count { it.url.contains("/current_notification/") } }
+		h.engine.pollNotification(force = false, foreground = true)
+		h.engine.pollNotification(force = false, foreground = true)
+		assertEquals(1, checks())
+		h.platform.wallBase += 61_000
+		h.engine.pollNotification(force = false, foreground = true)
+		assertEquals(2, checks())
+		h.engine.pollNotification(force = false)
+		assertEquals("the background's 15 minutes", 2, checks())
 	}
 
 	@Test fun resetIsANewVisitor() = runTest {

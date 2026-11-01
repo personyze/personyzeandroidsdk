@@ -50,10 +50,10 @@ public object Personyze : PersonyzeApi
 			current = client
 			val app = context.applicationContext as? Application
 			if (app != null)
-			{	AppForeground.install(app) { current?.onBackground() }
+			{	AppForeground.install(app, onForeground = { current?.onForeground() }, onBackground = { current?.onBackground() })
 			}
 			WorkScheduling.cancelLegacy(context)
-			WorkScheduling.scheduleNotifications(context, config.notifications)
+			WorkScheduling.scheduleNotifications(context, config.notifications, client.engine.backgroundCheckMinutes())
 			if (config.notifications && Build.VERSION.SDK_INT >= 33 && !NotificationRenderer.declaresPermission(context))
 			{	Log.w(AndroidPlatform.TAG, "Personyze: notifications = true, but the app's manifest does not declare android.permission.POST_NOTIFICATIONS - none can be shown on Android 13+")
 			}
@@ -139,6 +139,9 @@ public object Personyze : PersonyzeApi
 	override fun report(click: PersonyzeClick): Unit = events("report") { it.report(click) }
 	override suspend fun checkNotifications(): PersonyzeNotification? = current?.checkNotifications()
 	override fun setNotificationsEnabled(enabled: Boolean): Unit = events("setNotificationsEnabled") { it.setNotificationsEnabled(enabled) }
+	override fun setPushToken(token: String): Unit = events("setPushToken") { it.setPushToken(token) }
+	/**	False before [initialize] too: a message that arrives then is not shown - `Application.onCreate` initializes first. **/
+	override fun handlePushMessage(data: Map<String, String>): Boolean = current?.handlePushMessage(data) ?: false
 	override suspend fun verdict(conditionId: Int): Result<PersonyzeVerdict> =
 		current?.verdict(conditionId) ?: Result.failure(PersonyzeException.Invalid("Personyze.initialize() has not been called"))
 }

@@ -33,7 +33,26 @@ internal data class PersistedState
 	val pageReports: Map<Int, List<String>> = emptyMap(),
 	val notifications: PersistedNotifications = PersistedNotifications(),
 	/**	Device time until which the account is treated as paused (HTTP 429). **/
-	val throttledUntilMs: Long = 0
+	val throttledUntilMs: Long = 0,
+	val push: PersistedPush = PersistedPush()
+)
+
+/**	The device's push registration (SPEC section 11): the token the app passed on, and what
+	Personyze has of it.
+ **/
+@Serializable
+internal data class PersistedPush
+(	/**	What Firebase gave this install; null before the app passes one on. **/
+	val token: String? = null,
+	/**	"<visitor id> <token>" as last registered: registered again when either changes, or a week
+		has passed. Null when Personyze has no registration of this device.
+	 **/
+	val registered: String? = null,
+	val registeredAtMs: Long = 0,
+	/**	Whether Personyze pushes to this device - the account has a key for the platform (what the
+		registration answered). Then the background checks are few.
+	 **/
+	val active: Boolean = false
 )
 
 @Serializable
@@ -60,7 +79,9 @@ internal data class PersistedNotifications
 	/**	After a v1 upgrade the queued message was probably shown already (v1's delete never
 		deleted): take the first one seen as delivered, silently.
 	 **/
-	val primeOnNextPoll: Boolean = false
+	val primeOnNextPoll: Boolean = false,
+	/**	Report addresses (shown, tapped) not sent yet, oldest first. **/
+	val reports: List<String> = emptyList()
 )
 
 /**	A queued command and what it was queued under. **/

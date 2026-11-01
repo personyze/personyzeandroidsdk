@@ -107,6 +107,13 @@ class NotificationPollTest
 		assertEquals(false, n.silent)
 		assertEquals(true, n.renotify)
 		assertEquals(listOf("Open"), n.buttons.map { it.title })
+		assertTrue("a server from before the reports", n.shownUrl.isEmpty() && n.clickUrl.isEmpty())
+	}
+
+	@Test fun parsesTheReportAddresses()
+	{	val n = NotificationPoll.parse("""{"message_id":3,"title":"t","body":"b","shown_url":"https://pic/white/k=a/u=7","click_url":" https://pic/white/k=a/u=7/extra=1 "}""")!!
+		assertEquals("https://pic/white/k=a/u=7", n.shownUrl)
+		assertEquals("https://pic/white/k=a/u=7/extra=1", n.clickUrl)
 	}
 
 	@Test fun titleAndBodyAreRequired()

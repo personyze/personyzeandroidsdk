@@ -21,6 +21,11 @@ internal object Endpoints
 
 	fun verdict(conditionId: Int): String = "ab_test/where/condition_id=$conditionId"
 
+	/**	`PUT`: the device a push reaches (SPEC section 11). Everything goes in the body: a Firebase
+		token holds a `:`, which a `/where/` path reads as an operator.
+	 **/
+	const val PUSH_TOKEN = "push_token"
+
 	/**	The visitor's queued notification, by the visitor id - the id the server makes of `user_id`,
 		which is what field 1 of their session holds.
 

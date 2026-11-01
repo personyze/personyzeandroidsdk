@@ -28,6 +28,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
+import org.robolectric.Robolectric
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
@@ -99,8 +100,8 @@ class NotificationRendererTest
 {	private val context: Context = ApplicationProvider.getApplicationContext()
 	private val nm get() = context.getSystemService(NotificationManager::class.java)
 
-	private fun notification(buttons: List<PersonyzeNotification.Button> = emptyList(), url: String = "https://shop.example/sale") =
-		PersonyzeNotification(12, "Spring sale", "50% off today", url, "", "", "", buttons, false, false, listOf(100L, 50L))
+	private fun notification(buttons: List<PersonyzeNotification.Button> = emptyList(), url: String = "https://shop.example/sale", clickUrl: String = "") =
+		PersonyzeNotification(12, "Spring sale", "50% off today", url, "", "", "", buttons, false, false, listOf(100L, 50L), clickUrl = clickUrl)
 
 	@Before fun grant()
 	{	shadowOf(context as Application).grantPermissions(android.Manifest.permission.POST_NOTIFICATIONS)
@@ -121,6 +122,24 @@ class NotificationRendererTest
 		val content = shadowOf(posted.contentIntent).savedIntent
 		assertEquals(Intent.ACTION_VIEW, content.action)
 		assertEquals("https://shop.example/sale", content.dataString)
+	}
+
+	/**	A tap to report goes through the SDK's activity, with where it leads and the report; a button
+		with an address it may not open still gets no button.
+	 **/
+	@Test fun aTapToReportGoesThroughTheTapActivity() = runBlocking<Unit> {
+		val report = "https://pic.test/white/k=d57hr0hy9dp2/u=7/extra=1"
+		val buttons = listOf(PersonyzeNotification.Button("Open", "", "https://shop.example/a"), PersonyzeNotification.Button("Bad", "", "javascript:alert(1)"))
+		NotificationRenderer.show(context, notification(buttons, clickUrl = report), ImageLoader(OkHttpClient()), "Recommendations", 0)
+		val posted = shadowOf(nm).allNotifications.single()
+		val content = shadowOf(posted.contentIntent).savedIntent
+		assertEquals(NotificationTapActivity::class.java.name, content.component?.className)
+		assertEquals("https://shop.example/sale", content.getStringExtra(NotificationTapActivity.EXTRA_TARGET))
+		assertEquals(report, content.getStringExtra(NotificationTapActivity.EXTRA_REPORT))
+		assertEquals(1, posted.actions.size)
+		val button = shadowOf(posted.actions[0].actionIntent).savedIntent
+		assertEquals(NotificationTapActivity::class.java.name, button.component?.className)
+		assertEquals("https://shop.example/a", button.getStringExtra(NotificationTapActivity.EXTRA_TARGET))
 	}
 
 	@Test fun unsafeAddressFallsBackToTheApp() = runBlocking<Unit> {
@@ -208,11 +227,53 @@ class PersonyzeFacadeTest
 		assertEquals(ListenableWorker.Result.success(), o.doWork())
 	}
 
+	/**	A Personyze push, as the app's FirebaseMessagingService passes it on: drawn once, and answered
+		true; another app's push answered false, untouched.
+	 **/
+	@Test fun aPushedNotificationIsDrawnOnce()
+	{	shadowOf(context as Application).grantPermissions(android.Manifest.permission.POST_NOTIFICATIONS)
+		Personyze.initialize(context, PersonyzeConfig(KEY) { notifications = true; storageName = "push1" })
+		val data = mapOf("personyze" to """{"message_id":31,"title":"Spring sale","body":"50% off","tag":"https://shop.example/sale","actions":[]}""")
+		assertTrue(Personyze.handlePushMessage(data))
+		val nm = context.getSystemService(NotificationManager::class.java)
+		assertEquals("Spring sale", shadowOf(nm).allNotifications.single().extras.getString(NotificationCompat.EXTRA_TITLE))
+		nm.cancelAll()
+		assertTrue("ours, though not drawn again", Personyze.handlePushMessage(data))
+		assertTrue(shadowOf(nm).allNotifications.isEmpty())
+		assertFalse(Personyze.handlePushMessage(mapOf("order" to "shipped")))
+	}
+
 	@Test fun stateLivesInNoBackupFiles() = runBlocking<Unit> {
 		val client = Personyze.initialize(context, PersonyzeConfig(KEY) { storageName = "t1" })
 		client.productViewed("A1")	// no session yet: queued, and saved
 		kotlinx.coroutines.delay(500)
 		assertTrue(File(context.noBackupFilesDir, "personyze/t1/visitor").isFile)
 		assertNotNull(File(context.noBackupFilesDir, "personyze/t1/outbox.json").takeIf { it.isFile })
+	}
+}
+
+@RunWith(RobolectricTestRunner::class)
+class NotificationTapActivityTest
+{	private val context: Context = ApplicationProvider.getApplicationContext()
+
+	private fun tap(target: String, report: String) =
+		Intent(context, NotificationTapActivity::class.java)
+			.putExtra(NotificationTapActivity.EXTRA_TARGET, target)
+			.putExtra(NotificationTapActivity.EXTRA_REPORT, report)
+
+	/**	Before `initialize` the tap is not reported, and still opens where it leads. **/
+	@Test fun opensTheAddressAndCloses()
+	{	val activity = Robolectric.buildActivity(NotificationTapActivity::class.java, tap("https://shop.example/sale", "https://pic.test/white/k=d57hr0hy9dp2/u=7/extra=1")).create().get()
+		val next = shadowOf(activity).nextStartedActivity
+		assertEquals(Intent.ACTION_VIEW, next.action)
+		assertEquals("https://shop.example/sale", next.dataString)
+		assertTrue(activity.isFinishing)
+	}
+
+	/**	No address: the app - which the test package has no launcher activity for, so nothing. **/
+	@Test fun noAddressOpensTheApp()
+	{	val activity = Robolectric.buildActivity(NotificationTapActivity::class.java, tap("", "")).create().get()
+		assertNull(shadowOf(activity).nextStartedActivity)
+		assertTrue(activity.isFinishing)
 	}
 }

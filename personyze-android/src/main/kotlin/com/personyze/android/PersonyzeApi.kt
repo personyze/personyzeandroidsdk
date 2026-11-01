@@ -165,8 +165,25 @@ public sealed interface PersonyzeApi : PersonyzeEvents
 	 **/
 	public suspend fun checkNotifications(): PersonyzeNotification?
 
-	/**	Turn the periodic notification check on or off (also [PersonyzeConfig.Builder.notifications]). **/
+	/**	Turn the notifications on or off (also [PersonyzeConfig.Builder.notifications]): the periodic
+		check, and the device's push registration - turned off, Personyze stops pushing to it.
+	 **/
 	public fun setNotificationsEnabled(enabled: Boolean)
+
+	/**	The token Firebase Cloud Messaging gave the app: pass it on from your
+		`FirebaseMessagingService.onNewToken`, and once at start (`FirebaseMessaging.getInstance().token`).
+		Personyze then pushes this visitor's notifications to the device at once - when the account
+		has its Firebase service account (Integrations › App push in the Personyze panel) - instead of
+		waiting for the app's check. The SDK depends on no Firebase library: the app has its own.
+	 **/
+	public fun setPushToken(token: String)
+
+	/**	A push message, as your `FirebaseMessagingService.onMessageReceived` gets it
+		(`remoteMessage.data`): if it is Personyze's, the SDK shows it - as it shows a checked one, with
+		its picture and buttons - reports it shown, and answers true; anything else answers false and
+		is yours. It waits for the pictures, 15 seconds at most, as `onMessageReceived` may.
+	 **/
+	public fun handlePushMessage(data: Map<String, String>): Boolean
 
 	/**	Who is winning the A/B test of campaign [conditionId]. **/
 	public suspend fun verdict(conditionId: Int): Result<PersonyzeVerdict>

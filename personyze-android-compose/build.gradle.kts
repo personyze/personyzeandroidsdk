@@ -22,8 +22,9 @@ android {
 
 	lint {
 		// The versions are pinned on purpose (gradle/libs.versions.toml says why): newer androidx would
-		// raise every app's compileSdk, newer Kotlin libraries would not compile with AGP 9.4's Kotlin.
-		disable += setOf("GradleDependency", "NewerVersionAvailable")
+		// raise every app's compileSdk, newer Kotlin libraries would not compile with AGP 9.4's Kotlin, and
+		// AGP itself stays at 9.4.1 for that Kotlin.
+		disable += setOf("GradleDependency", "NewerVersionAvailable", "AndroidGradlePluginVersion")
 		warningsAsErrors = true
 	}
 
