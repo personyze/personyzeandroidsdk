@@ -11,7 +11,8 @@
   depends on no Firebase library). Once pushed to, the background check runs every 6 hours.
 - Notifications are checked as the app comes to the front too, once a minute at most - before, only
   in the background every 15 minutes.
-- `PersonyzeApi` gains `setPushToken` and `handlePushMessage`.
+- `PersonyzeApi` gains `setPushToken`, `handlePushMessage` and `pushStatus` (a `StateFlow` of `PersonyzePushStatus`:
+  the token, the visitor it is registered for, whether Personyze pushes to it); `diagnostics()` prints it too.
 
 ## 2.0.0 - 2026-10-24
 

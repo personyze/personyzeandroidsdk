@@ -1,6 +1,7 @@
 package com.personyze.android.internal.core
 
 import com.personyze.android.PersonyzeException
+import com.personyze.android.PersonyzePushStatus
 import com.personyze.android.PersonyzeException.Delivery.Reason
 import com.personyze.android.PersonyzeException.Transport.Kind
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -721,9 +722,13 @@ class EngineTest
 		h.engine.setPushToken("dev:abc")
 		advanceUntilIdle()
 		assertTrue("no visitor yet", pushBodies(h).isEmpty())
+		assertEquals("a token, not registered yet", PersonyzePushStatus("dev:abc", null, 0, false), h.engine.push.value)
 		h.engine.navigate("Home", null)
 		advanceUntilIdle()
 		val visitor = h.engine.visitor.value.visitorId!!
+		val status = h.engine.push.value
+		assertEquals(listOf<Any?>("dev:abc", visitor, true), listOf(status.token, status.registeredVisitorId, status.pushed))
+		assertTrue("registered when", status.registeredAtMs > 0)
 		assertEquals(listOf(buildJsonObject { put("user_id", visitor); put("token", "dev:abc"); put("platform", "android"); put("app_id", "com.shop.app"); put("sandbox", false); put("enabled", true) }), pushBodies(h))
 		assertEquals("PUT", h.transport.requests.last().method)
 		assertEquals("pushed: the background checks are few", 360L, h.engine.backgroundCheckMinutes())
@@ -739,10 +744,15 @@ class EngineTest
 	 **/
 	@Test fun withoutAKeyTheChecksStayAsTheyWere() = runTest {
 		val h = pushHarness("""{"push":false}""")
-		h.engine.setPushToken("dev:abc")
+		h.engine.setPushToken("dev:abc-0123456789-0123456789")
 		h.engine.navigate("Home", null)
 		advanceUntilIdle()
 		assertEquals(1, pushBodies(h).size)
+		assertFalse("registered, not pushed: no key", h.engine.push.value.pushed)
+		assertEquals(h.engine.visitor.value.visitorId, h.engine.push.value.registeredVisitorId)
+		val diagnostics = h.engine.diagnostics()
+		assertTrue(diagnostics, diagnostics.contains("push=PersonyzePushStatus(token=dev:abc-01… (29)"))
+		assertFalse("the whole token in diagnostics", diagnostics.contains("dev:abc-0123456789-0123456789"))
 		assertEquals(15L, h.engine.backgroundCheckMinutes())
 	}
 

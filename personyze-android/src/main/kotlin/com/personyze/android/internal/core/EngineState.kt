@@ -54,6 +54,10 @@ internal data class PersistedPush
 	 **/
 	val active: Boolean = false
 )
+{	/**	The visitor id of [registered] ("<visitor> <token>"). **/
+	val registeredVisitorId: Int?
+		get() = registered?.substringBefore(' ')?.toIntOrNull()
+}
 
 @Serializable
 internal data class PersistedResult

@@ -93,12 +93,16 @@ public object Personyze : PersonyzeApi
 
 	private val emptyResult = MutableStateFlow(PersonyzeResult.EMPTY)
 	private val emptyVisitor = MutableStateFlow(PersonyzeVisitor(null, null, null))
+	private val emptyPush = MutableStateFlow(PersonyzePushStatus(null, null, 0, false))
 
 	override val result: StateFlow<PersonyzeResult>
 		get() = current?.result ?: emptyResult
 
 	override val visitor: StateFlow<PersonyzeVisitor>
 		get() = current?.visitor ?: emptyVisitor
+
+	override val pushStatus: StateFlow<PersonyzePushStatus>
+		get() = current?.pushStatus ?: emptyPush
 
 	override suspend fun navigate(document: String, events: (PersonyzeEvents.() -> Unit)?): PersonyzeResult = current?.navigate(document, events) ?: notInitialized()
 	override suspend fun refresh(): PersonyzeResult = current?.refresh() ?: notInitialized()

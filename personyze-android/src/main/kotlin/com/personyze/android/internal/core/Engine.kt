@@ -9,6 +9,7 @@ import com.personyze.android.PersonyzeException.Delivery.Reason
 import com.personyze.android.PersonyzeException.Transport.Kind
 import com.personyze.android.PersonyzeNotification
 import com.personyze.android.PersonyzePlaceholder
+import com.personyze.android.PersonyzePushStatus
 import com.personyze.android.PersonyzeResult
 import com.personyze.android.PersonyzeVerdict
 import com.personyze.android.PersonyzeVisitor
@@ -106,6 +107,8 @@ internal class Engine
 
 	val result: StateFlow<PersonyzeResult> = resultFlow
 	val visitor: StateFlow<PersonyzeVisitor> = visitorFlow
+	private val pushFlow = MutableStateFlow(PersonyzePushStatus(null, null, 0, false))
+	val push: StateFlow<PersonyzePushStatus> = pushFlow
 
 	init
 	{	scope.launch(io) {
@@ -987,6 +990,7 @@ internal class Engine
 	{	mutate {
 			if (token != state.push.token)
 			{	state = state.copy(push = state.push.copy(token = token))
+				emitPushLocked()
 				persistSoon()
 			}
 		}
@@ -1037,6 +1041,7 @@ internal class Engine
 				{	val active = job.second != null && Wire.bool((Wire.json.parseToJsonElement(outcome.body.ifBlank { "{}" }) as? JsonObject)?.get("push"))
 					synchronized(lock) {
 						state = state.copy(push = state.push.copy(registered = job.second, registeredAtMs = now, active = active))
+						emitPushLocked()
 					}
 					persistSoon()
 				}
@@ -1143,8 +1148,14 @@ internal class Engine
 
 	// ------------------------------------------------------------------------------- state & output
 
+	private fun emitPushLocked()
+	{	val p = state.push
+		pushFlow.value = PersonyzePushStatus(p.token, p.registeredVisitorId, p.registeredAtMs, p.active)
+	}
+
 	private fun emitLocked()
-	{	resultFlow.value = buildResultLocked()
+	{	emitPushLocked()
+		resultFlow.value = buildResultLocked()
 		val user = currentUserLocked()
 		visitorFlow.value = PersonyzeVisitor(
 			userId = state.userId?.content,
@@ -1253,6 +1264,7 @@ internal class Engine
 			.append(metadata.actions.size).append(" actions, ").append(metadata.placeholders.size).append(" placeholders, ").append(metadata.missing.size).append(" missing\n")
 		sb.append("pageReports=").append(state.pageReports).append('\n')
 		sb.append("notifications=").append(state.notifications).append('\n')
+		sb.append("push=").append(pushFlow.value).append(" (registered ").append(state.push.registered?.let { "for visitor " + state.push.registeredVisitorId } ?: "nowhere").append(")\n")
 		sb.append("throttledUntilMs=").append(state.throttledUntilMs).append('\n')
 		sb.append("queue (").append(pending.size).append("):\n")
 		for (item in pending)

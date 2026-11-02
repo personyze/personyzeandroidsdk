@@ -77,6 +77,9 @@ public class PersonyzeClient internal constructor(context: Context, public val c
 	override val visitor: StateFlow<PersonyzeVisitor>
 		get() = engine.visitor
 
+	override val pushStatus: StateFlow<PersonyzePushStatus>
+		get() = engine.push
+
 	override suspend fun navigate(document: String, events: (PersonyzeEvents.() -> Unit)?): PersonyzeResult =
 		engine.navigate(document, events?.let { block -> { block(this) } })
 

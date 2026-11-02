@@ -93,6 +93,11 @@ public sealed interface PersonyzeApi : PersonyzeEvents
 	/**	The current visitor and session. **/
 	public val visitor: StateFlow<PersonyzeVisitor>
 
+	/**	Where push stands on this install: the token passed on, the visitor it is registered for, whether Personyze
+		pushes to it ([PersonyzePushStatus] says what each state means).
+	 **/
+	public val pushStatus: StateFlow<PersonyzePushStatus>
+
 	/**	The visitor opened a screen ("document"): log it and get what to present there, in one
 		round trip. [events] run first and go in the same request, attributed to this screen:
 

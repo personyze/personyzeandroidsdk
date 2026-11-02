@@ -202,11 +202,18 @@ class PushService : FirebaseMessagingService()
 }
 ```
 
-and once at start, after `initialize`:
+and each time the app comes to the front - in your main activity's `onStart`:
 
 ```kotlin
-FirebaseMessaging.getInstance().token.addOnSuccessListener { Personyze.setPushToken(it) }
+override fun onStart()
+{	super.onStart()
+	FirebaseMessaging.getInstance().token.addOnSuccessListener { Personyze.setPushToken(it) }
+}
 ```
+
+Firebase keeps the token, so asking again costs nothing; and after a request that failed for good (no network on the
+first launch, Play services not ready yet) Firebase does not ask again by itself until the app restarts - asking at
+every start gets the token the next time the app is opened.
 
 `handlePushMessage` shows the notification as a checked one is shown, reports it shown, and answers
 false for a message that is not Personyze's. Firebase Messaging 26 marks `onNewToken` and `getToken()`
@@ -215,6 +222,13 @@ sends to the registration token, and those calls still work. The SDK registers t
 current visitor, again after a login or a logout, and takes it off when the notifications are turned
 off or the visitor is reset. Once Personyze pushes to the device, the background check runs every 6
 hours instead of 15 minutes; a push that does not go is still shown at the app's next check.
+
+**Checking it works.** The device registers after the app's first request to Personyze - a navigation, events or a
+refresh - since a device is registered for a visitor. `Personyze.pushStatus` (a `StateFlow`) says where it stands:
+the token passed on, the visitor it is registered for, and whether Personyze pushes to it (the account has its key);
+`diagnostics()` prints the same. In the panel, Integrations › App push counts the devices registered, and **Send a
+test notification** pushes one at once - to a visitor id, or the devices that registered last - and says what
+Firebase answered. A campaign's own notifications wait for the visitor's session to end, an hour and a half or more.
 
 Many Android builds put apps in a battery saver that stops background work; a user may have to allow
 it for your app (libraries such as [AutoStarter](https://github.com/judemanutd/AutoStarter) open the
