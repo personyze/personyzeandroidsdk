@@ -1,4 +1,4 @@
-# Personyze Android SDK 2.0
+# Personyze Android SDK 2.1
 
 Personalization and A/B testing for Android apps: tell [Personyze](https://www.personyze.com/) what
 the visitor does, get back the campaigns they match and the actions to present, render them, and
@@ -10,7 +10,7 @@ Kotlin, coroutines, `StateFlow`, Jetpack Compose. Replaces the 1.x Java SDK, whi
 
 | | |
 | --- | --- |
-| Artifacts | `com.personyze:personyze-android:2.0.0`, `com.personyze:personyze-android-compose:2.0.0` |
+| Artifacts | `com.personyze:personyze-android:2.1.0`, `com.personyze:personyze-android-compose:2.1.0` |
 | Android | minSdk 24; the app compiles with compileSdk 35 or later |
 | Kotlin | 2.1 or later (built with 2.2) |
 | Docs | the [Android SDK guide](https://personyze.com/wiki/mob:android-sdk-guide) and [reference](https://personyze.com/wiki/mob:android-sdk-docs) |
@@ -21,13 +21,13 @@ Kotlin, coroutines, `StateFlow`, Jetpack Compose. Replaces the 1.x Java SDK, whi
 ```kotlin
 // app/build.gradle.kts
 dependencies {
-	implementation("com.personyze:personyze-android:2.0.0")
+	implementation("com.personyze:personyze-android:2.1.0")
 	// only to render actions in Jetpack Compose:
-	implementation("com.personyze:personyze-android-compose:2.0.0")
+	implementation("com.personyze:personyze-android-compose:2.1.0")
 }
 ```
 
-From Maven Central (published 2026-10-24), which new Android projects already list. An unreleased build of this
+From Maven Central, which new Android projects already list. What each version changed is in [CHANGELOG.md](CHANGELOG.md). An unreleased build of this
 repository: `./gradlew publishReleasePublicationToBuildRepository` writes it to `build/repo`, and an app reads it with
 `maven(url = "/path/to/personyzeandroidsdk/build/repo")` in its `settings.gradle.kts` repositories.
 

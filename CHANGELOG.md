@@ -1,6 +1,6 @@
 # Changelog
 
-## 2.1.0 - not released yet
+## 2.1.0 - 2026-11-02
 
 - Notifications are reported: shown when posted, clicked when the notification or one of its buttons
   is tapped - the campaign's statistics count them as they count a website's push. A tap passes
