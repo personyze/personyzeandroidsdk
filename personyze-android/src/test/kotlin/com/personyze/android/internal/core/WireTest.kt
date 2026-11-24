@@ -16,7 +16,8 @@ class WireTest
 	@Test fun requestBodyHasTheGuidesFields()
 	{	val body = Wire.json.parseToJsonElement(
 			Wire.requestBody(
-				JsonPrimitive(500123456),
+				Identity(JsonPrimitive(500123456), anonymous = false),
+				false,
 				null,
 				true,
 				listOf(1761220800L, 1761000000L),
@@ -25,13 +26,51 @@ class WireTest
 				listOf(listOf("Navigate", "urn:personyze:doc:Home"), listOf("User profile", "gender", null))
 			)
 		).jsonObject
-		assertEquals(listOf("user_id", "session_id", "new_session", "past_sessions", "platform", "time_zone", "languages", "screen", "os", "device_type", "noti_enabled", "commands"), body.keys.toList())
+		assertEquals(listOf("protocol", "user_id", "session_id", "new_session", "past_sessions", "platform", "time_zone", "languages", "screen", "os", "device_type", "noti_enabled", "commands"), body.keys.toList())
+		assertEquals("2", body["protocol"]!!.jsonPrimitive.content)
 		assertEquals("500123456", body["user_id"]!!.jsonPrimitive.content)
 		assertTrue(body["user_id"]!!.jsonPrimitive.isString.not())
 		assertEquals(JsonNull, body["session_id"])
 		assertEquals("1761220800,1761000000", body["past_sessions"]!!.jsonPrimitive.content)
 		assertEquals("Android", body["platform"]!!.jsonPrimitive.content)
 		assertEquals(JsonNull, body["commands"]!!.jsonArray[1].jsonArray[2])
+	}
+
+	/**	Protocol 2 (SPEC section 1): the install's visitor as `pz_visitor_id`, decimal text at any
+		width, with `pz_visitor_new` only while it is new - and never beside `user_id`.
+	 **/
+	@Test fun anonymousVisitorGoesAsPzVisitorId()
+	{	val device = DeviceContext(3.0, "en-US", "1080x2400", "Android/14", "phone")
+		val minted = Wire.json.parseToJsonElement(Wire.requestBody(Identity.anonymous(-1520401369231049551L), true, null, true, emptyList(), device, false, emptyList())).jsonObject
+		assertEquals(listOf("protocol", "pz_visitor_id", "pz_visitor_new", "session_id"), minted.keys.take(4))
+		assertEquals(JsonPrimitive("-1520401369231049551"), minted["pz_visitor_id"])
+		assertEquals(JsonPrimitive(true), minted["pz_visitor_new"])
+		assertNull(minted["user_id"])
+		val named = Wire.json.parseToJsonElement(Wire.requestBody(Identity.anonymous(9223372036854775807L), false, "1 9223372036854775807 7 1", false, emptyList(), device, false, emptyList())).jsonObject
+		assertEquals(JsonPrimitive("9223372036854775807"), named["pz_visitor_id"])
+		assertNull(named["pz_visitor_new"])
+		assertNull(named["user_id"])
+		// A login is user_id as it was set, even with the install's id new.
+		val login = Wire.json.parseToJsonElement(Wire.requestBody(Identity(JsonPrimitive("alice"), false), true, null, true, emptyList(), device, false, emptyList())).jsonObject
+		assertEquals(JsonPrimitive("alice"), login["user_id"])
+		assertNull(login["pz_visitor_id"])
+		assertNull(login["pz_visitor_new"])
+	}
+
+	/**	`pz_visitor_id` read from its literal - a string, or a number written out - never through a
+		double; `id_bits` only as 32 or 64.
+	 **/
+	@Test fun responseNamesTheVisitor()
+	{	val r = Wire.parseResponse("""{"session_id":"1 -1520401369231049551 3 1","actions":[],"pz_visitor_id":"-1520401369231049551","id_bits":64}""")!!
+		assertEquals(-1520401369231049551L, r.pzVisitorId)
+		assertEquals(64, r.idBits)
+		assertEquals(9007199254740993L, Wire.parseResponse("""{"session_id":null,"actions":[],"pz_visitor_id":9007199254740993,"id_bits":"32"}""")!!.pzVisitorId)
+		assertEquals(32, Wire.parseResponse("""{"session_id":null,"actions":[],"id_bits":"32"}""")!!.idBits)
+		val old = Wire.parseResponse("""{"session_id":"1 2 3 1","actions":[]}""")!!
+		assertNull("a server before protocol 2", old.pzVisitorId)
+		assertNull(old.idBits)
+		assertNull(Wire.parseResponse("""{"actions":[],"pz_visitor_id":"0","id_bits":48}""")!!.pzVisitorId)
+		assertNull(Wire.parseResponse("""{"actions":[],"pz_visitor_id":"0","id_bits":48}""")!!.idBits)
 	}
 
 	@Test fun responseIsReadLeniently()

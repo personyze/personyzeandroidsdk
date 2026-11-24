@@ -28,8 +28,19 @@ internal class DeviceContext
 internal object Wire
 {	val json = Json { ignoreUnknownKeys = true; explicitNulls = false; encodeDefaults = true }
 
+	/**	The tracker endpoint's protocol this SDK speaks (SPEC section 1): 2 since SDK 3.0, the visitor
+		at any width. Without it the server answers version 1 - one `user_id` for the app's id and the
+		install's, both coerced to 32 bits.
+	 **/
+	const val PROTOCOL = 2
+
+	/**	[visitor] goes as `user_id` (a login, as the app set it) or, anonymous, as `pz_visitor_id` -
+		decimal text, which no JSON parser rounds - with `pz_visitor_new` while [visitorNew]: the SDK
+		minted the id and no answer has named it yet. Never both fields (the server answers 400).
+	 **/
 	fun requestBody
-	(	userId: JsonPrimitive,
+	(	visitor: Identity,
+		visitorNew: Boolean,
 		sessionId: String?,
 		newSession: Boolean,
 		pastSessions: List<Long>,
@@ -37,7 +48,16 @@ internal object Wire
 		notiEnabled: Boolean,
 		commands: List<Command>
 	): String = buildJsonObject {
-		put("user_id", userId)
+		put("protocol", PROTOCOL)
+		if (visitor.anonymous)
+		{	put("pz_visitor_id", visitor.user.content)
+			if (visitorNew)
+			{	put("pz_visitor_new", true)
+			}
+		}
+		else
+		{	put("user_id", visitor.user)
+		}
 		put("session_id", sessionId?.let { JsonPrimitive(it) } ?: JsonNull)
 		put("new_session", newSession)
 		put("past_sessions", pastSessions.joinToString(","))
@@ -64,7 +84,13 @@ internal object Wire
 		val actions: List<Decided>,
 		val dismissConditions: List<Int>,
 		val dismissActions: List<Int>,
-		val raw: String
+		val raw: String,
+		/**	Protocol 2: the visitor the request was logged under - the one the SDK keeps from now on.
+			Null from a server before it, and for anything that is not a visitor id.
+		 **/
+		val pzVisitorId: Long? = null,
+		/**	Protocol 2: 64 where the account mints 64-bit visitor ids, else 32; null when absent. **/
+		val idBits: Int? = null
 	)
 
 	/**	Null when the body is not the object the tracker sends - treated as a failed request. **/
@@ -89,7 +115,10 @@ internal object Wire
 			},
 			dismissConditions = (obj["dismiss_conditions"] as? JsonArray).orEmpty().mapNotNull { int(it) },
 			dismissActions = (obj["dismiss_actions"] as? JsonArray).orEmpty().mapNotNull { int(it) },
-			raw = text
+			raw = text,
+			// A string always; a number is read from its literal, as written - never through a double.
+			pzVisitorId = (obj["pz_visitor_id"] as? JsonPrimitive)?.takeIf { it !is JsonNull }?.let { Session.visitorId(it.content) },
+			idBits = int(obj["id_bits"])?.takeIf { it == 32 || it == 64 }
 		)
 	}
 

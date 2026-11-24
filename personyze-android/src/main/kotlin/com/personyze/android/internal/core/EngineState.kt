@@ -34,7 +34,17 @@ internal data class PersistedState
 	val notifications: PersistedNotifications = PersistedNotifications(),
 	/**	Device time until which the account is treated as paused (HTTP 429). **/
 	val throttledUntilMs: Long = 0,
-	val push: PersistedPush = PersistedPush()
+	val push: PersistedPush = PersistedPush(),
+	/**	The last answer's `id_bits` (SPEC section 1): the width the next anonymous visitor is minted
+		at - after a `reset()`, or a lost `visitor` file. 32 until an answer says otherwise, and for
+		another account: the server re-mints a new 32-bit visitor at 64 where the account mints them.
+	 **/
+	val idBits: Int = 32,
+	/**	The install's visitor when this was saved, as the `visitor` file writes it (`<id>`, or `<id>
+		new`). That file says who it is now - an id adopted after the last save (the app died between
+		the two writes) takes over what was left for this one; and with that file lost, this is who it is.
+	 **/
+	val installVisitor: String? = null
 )
 
 /**	The device's push registration (SPEC section 11): the token the app passed on, and what
@@ -54,9 +64,9 @@ internal data class PersistedPush
 	 **/
 	val active: Boolean = false
 )
-{	/**	The visitor id of [registered] ("<visitor> <token>"). **/
-	val registeredVisitorId: Int?
-		get() = registered?.substringBefore(' ')?.toIntOrNull()
+{	/**	The visitor id of [registered] ("<visitor> <token>"), 64 bits. **/
+	val registeredVisitorId: Long?
+		get() = registered?.substringBefore(' ')?.toLongOrNull()
 }
 
 @Serializable
@@ -88,11 +98,30 @@ internal data class PersistedNotifications
 	val reports: List<String> = emptyList()
 )
 
+/**	Who a request is about (SPEC section 1, protocol 2): the app's own id for the visitor, a login
+	(`setUserId`), sent as `user_id` as it was set - text or a number; or, [anonymous], the install's
+	visitor, Personyze's own id as decimal text, sent as `pz_visitor_id`.
+ **/
+internal data class Identity(val user: JsonPrimitive, val anonymous: Boolean)
+{	/**	The visitor the server makes of the request (SPEC section 3), what field 1 of its session must
+		be: the install's id itself, or the coercion of `user_id`. Null when it cannot be told.
+	 **/
+	val visitorId: Long?
+		get() = if (anonymous) Session.visitorId(user.content) else Session.serverUserId(userValue(user))?.toLong()
+
+	internal companion object
+	{	/**	The user id as the server reads it: text stays text, a number is a number. **/
+		fun userValue(user: JsonPrimitive): Any = if (user.isString) user.content else user.content.toLongOrNull() ?: user.content
+
+		fun anonymous(visitorId: Long): Identity = Identity(JsonPrimitive(visitorId.toString()), true)
+	}
+}
+
 /**	A queued command and what it was queued under. **/
 @Serializable
 internal data class PendingItem
 (	val cmd: List<String?>,
-	/**	The `user_id` it is about. **/
+	/**	The `user_id` it is about, or with [anonymous] the `pz_visitor_id`. **/
 	val user: JsonPrimitive,
 	val epoch: Int,
 	/**	Start of the session it was queued in (0 for none): an action report goes only into that session. **/
@@ -104,8 +133,15 @@ internal data class PendingItem
 	val inflight: Boolean = false,
 	/**	A navigation is never kept for later - a page view sent hours late is a wrong page view. **/
 	val navigate: Boolean = false,
-	val seq: Long = 0
+	val seq: Long = 0,
+	/**	[user] is the install's anonymous visitor (SDK 3.0). An item an older SDK queued has none:
+		the install's is recognized as it loads.
+	 **/
+	val anonymous: Boolean = false
 )
+{	val identity: Identity
+		get() = Identity(user, anonymous)
+}
 
 @Serializable
 internal data class OutboxFile(val v: Int = 1, val items: List<PendingItem> = emptyList())

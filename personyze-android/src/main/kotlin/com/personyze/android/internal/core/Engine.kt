@@ -33,7 +33,7 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import java.security.MessageDigest
-import kotlin.random.Random
+import java.security.SecureRandom
 
 internal class EngineConfig
 (	val apiKey: String,
@@ -54,9 +54,11 @@ internal class EngineConfig
 	request carries the session the previous response returned, so two in flight would fork it.
 	Template fetches ([meta]) run outside [wire]. Disk is touched only from [io].
 
-	**What makes a request** (SPEC section 3): the visitor (`user_id`) is the app's user id or the
-	install's anonymous id; a stored session of another visitor is no session; `new_session` is
-	computed - a forced new session, no session, or one older than 90 minutes - never constant.
+	**What makes a request** (SPEC sections 1 and 3, protocol 2): the visitor is the app's user id,
+	sent as `user_id`, or the install's anonymous id, sent as `pz_visitor_id` - with `pz_visitor_new`
+	until an answer names it, and replaced by the answer's when that differs; a stored session of
+	another visitor is no session; `new_session` is computed - a forced new session, no session, or
+	one older than 90 minutes - never constant.
 
 	**What survives** a failure or the app being killed (SPEC section 5 - the endpoint is not
 	idempotent, and a purchase counted twice is worse than one missing): queued events are on disk.
@@ -75,7 +77,9 @@ internal class Engine
 	private val io: CoroutineDispatcher,
 	private val legacy: LegacySource?,
 	private val onError: (PersonyzeException, PersonyzeErrorContext) -> Unit,
-	private val owner: () -> PersonyzeApi?
+	private val owner: () -> PersonyzeApi?,
+	/**	What anonymous visitor ids are minted from; tests pass one that answers what they need. **/
+	private val random: java.util.Random = SecureRandom()
 )
 {	private val rest = RestClient(transport, config.apiKey, config.baseUrl, config.retries, platform::monotonicMs, config.userAgent)
 	private val apiKeyFp = sha256(config.apiKey).take(16)
@@ -97,7 +101,10 @@ internal class Engine
 	private var state = PersistedState()
 	private val pending = ArrayList<PendingItem>()
 	private var seq = 1L
-	private var installVisitor = 0
+	/**	The install's anonymous visitor (SPEC section 11), 64 bits: what `pz_visitor_id` sends. **/
+	private var installVisitor = 0L
+	/**	The SDK minted [installVisitor] and no answer has named it yet: sent with `pz_visitor_new`. **/
+	private var installVisitorNew = false
 	private var metadata = MetadataFile()
 	private var autoFlushJob: Job? = null
 
@@ -117,7 +124,14 @@ internal class Engine
 			}
 			catch (e: Exception)
 			{	platform.log("Personyze: could not load the stored state: $e")
-				synchronized(lock) { markLoadedLocked() }
+				synchronized(lock) {
+					if (installVisitor == 0L)
+					{	// A visitor for this process at least: a request with none is refused.
+						installVisitor = Session.mintVisitorId(32, random)
+						installVisitorNew = true
+					}
+					markLoadedLocked()
+				}
 			}
 		}
 		scope.launch(io) {
@@ -130,7 +144,10 @@ internal class Engine
 	// ---------------------------------------------------------------------------------------- load
 
 	private fun load()
-	{	val storedVisitor = store.read(VISITOR)?.trim()?.toIntOrNull()?.takeIf { it != 0 }
+	{	val visitorText = store.read(VISITOR)
+		val stored = readVisitorFile(visitorText)
+		val storedVisitor = stored?.first
+		val storedNew = stored?.second == true
 		var st = store.read(STATE)?.let { text ->
 			try
 			{	Wire.json.decodeFromString(PersistedState.serializer(), text)
@@ -160,7 +177,7 @@ internal class Engine
 			}
 			if (old != null)
 			{	// The v1 visitor id is kept even below 500,000,000: it is the visitor's history and A/B arms.
-				installId = installId ?: old.userId.takeIf { it != 0 }
+				installId = installId ?: old.userId.takeIf { it != 0 }?.toLong()
 				val sameKey = old.apiKeyHash == config.apiKey.hashCode()
 				st = PersistedState(
 					apiKeyFp = apiKeyFp,
@@ -173,19 +190,38 @@ internal class Engine
 				migrated = true
 			}
 		}
-		if (installId == null)
-		{	installId = Random.nextInt(MIN_ANONYMOUS_ID, Int.MAX_VALUE)
-		}
-		if (installId != storedVisitor)
-		{	store.write(VISITOR, installId.toString(), sync = true)
-		}
 		st = st ?: PersistedState(apiKeyFp = apiKeyFp)
 		if (st.apiKeyFp != null && st.apiKeyFp != apiKeyFp)
-		{	// Another account: its session, history and queue mean nothing here.
+		{	// Another account: its session, history, queue and id width mean nothing here.
 			st = PersistedState(apiKeyFp = apiKeyFp, userId = st.userId)
 			outbox = emptyList()
 		}
 		st = st.copy(apiKeyFp = apiKeyFp)
+		// The `visitor` file lost, state.json kept: the state says whose it was - that visitor, with its
+		// session and what waits for it, not a new one minted beside its history (the confirm review,
+		// nit 3). Otherwise the first run, which has heard no `id_bits`: 32 bits, which the server
+		// upgrades where the account mints 64 (SPEC section 11).
+		val restored = if (installId == null) readVisitorFile(st.installVisitor) else null
+		val install = installId ?: restored?.first ?: Session.mintVisitorId(st.idBits, random)
+		val installNew = if (installId != null) storedNew else restored?.second ?: true
+		val visitorFile = visitorFileText(install, installNew)
+		if (visitorFile != visitorText)
+		{	store.write(VISITOR, visitorFile, sync = true)
+		}
+		// What waits for the install's visitor is the install's: only its predecessors can be found
+		// here - a reset and another key clear the queue and the state. An id adopted after the state
+		// was saved (the app died between the two writes: the review, minor 3), or 2.x's `user_id` - a
+		// number, the same visitor to the server (SPEC section 3), `pz_visitor_id` now. Left as they
+		// were, the events would be dropped as another visitor's and a shown message shown again.
+		val installText = install.toString()
+		outbox = outbox.map { item ->
+			if (item.anonymous && item.user.content != installText || !item.anonymous && !item.user.isString && item.user.content.toLongOrNull() == install) item.copy(user = JsonPrimitive(installText), anonymous = true) else item
+		}
+		val savedFor = readVisitorFile(st.installVisitor)?.first?.toString()
+		val shown = savedFor?.let { st.notifications.delivered[it] }
+		if (savedFor != null && savedFor != installText && shown != null)
+		{	st = st.copy(notifications = st.notifications.copy(delivered = (st.notifications.delivered - savedFor) + (installText to shown)))
+		}
 		val cached = cacheStore.read(METADATA)?.let { text ->
 			try
 			{	Wire.json.decodeFromString(MetadataFile.serializer(), text)
@@ -200,7 +236,8 @@ internal class Engine
 		synchronized(lock) {
 			state = st
 			metadata = md
-			installVisitor = installId
+			installVisitor = install
+			installVisitorNew = installNew
 			pending.clear()
 			pending.addAll(kept)
 			seq = (kept.maxOfOrNull { it.seq } ?: 0) + 1
@@ -280,16 +317,30 @@ internal class Engine
 	{	if (Commands.isActionStatus(cmd) && !acceptStatusLocked(cmd))
 		{	return null
 		}
-		val user = currentUserLocked()
+		val visitor = currentUserLocked()
+		val sessionStart = if (Session.isSessionOf(state.session, visitor.visitorId)) Session.startTime(state.session) else 0
+		if (Commands.isActionStatus(cmd) && cmd[2] != "dont-show" && sessionStart == 0L)
+		{	// An action is decided in a session of its visitor's. Reported with none of the current
+			// visitor's - the decision was the one before a login, a logout or a reset - it belongs to no
+			// session of theirs, and held for their first navigation it would be counted there (the
+			// confirm review of the port, minor 1; SPEC section 11, Difference 3). Not sent; what it does
+			// on the device (a close blocks the action here) it still did - the person did close it.
+			report(
+				PersonyzeException.Delivery(Reason.OTHER_SESSION, listOf(cmd.map { it.orEmpty() }), "An action report for a decision made before the visitor changed is not sent"),
+				PersonyzeErrorContext("track", dropped = 1)
+			)
+			return null
+		}
 		val item = PendingItem(
 			cmd = cmd,
-			user = user,
+			user = visitor.user,
 			epoch = state.epoch,
-			sessionStart = if (Session.isSessionOf(state.session, userValue(user))) Session.startTime(state.session) else 0,
+			sessionStart = sessionStart,
 			queuedAtMs = platform.nowMs(),
 			raw = raw,
 			navigate = navigate,
-			seq = seq++
+			seq = seq++,
+			anonymous = visitor.anonymous
 		)
 		pending.add(item)
 		enforceCapLocked()
@@ -383,7 +434,15 @@ internal class Engine
 		{	val error = PersonyzeException.Transport(429, Kind.RATE_LIMITED, "Personyze paused this account's tracking (HTTP 429); not asking again for a few minutes")
 			return@withContext failNavigation(error, null)
 		}
-		val drained = underWire(deadline) { drain(deadline, live = false, operation = "navigate", navSeq = navItem.seq) }
+		var drained = underWire(deadline) { drain(deadline, operation = "navigate", navSeq = navItem.seq) }
+		// Another caller's navigation, queued before this one, had not had the wire yet: the queue goes
+		// in order, so this one waits for its turn - failing at once ("did not answer"), it logged no
+		// page view (the confirm review, nit 2).
+		while (drained != null && !drained.navigateDone && drained.navigateError == null && platform.monotonicMs() < deadline &&
+			synchronized(lock) { pending.any { it.navigate && it.seq < navItem.seq } })
+		{	delay(TURN_WAIT_MS)
+			drained = underWire(deadline) { drain(deadline, operation = "navigate", navSeq = navItem.seq) }
+		}
 		if (drained == null)
 		{	val error = PersonyzeException.Transport(null, Kind.TIMEOUT, "Personyze did not answer within ${config.timeoutMs}ms (an earlier request was still in flight)")
 			report(error, PersonyzeErrorContext("navigate"))
@@ -420,7 +479,7 @@ internal class Engine
 		}
 		val deadline = platform.monotonicMs() + config.timeoutMs
 		val outcome = underWire(deadline) {
-			val drained = drain(deadline, live = false, operation = "refresh", navSeq = null)
+			val drained = drain(deadline, operation = "refresh", navSeq = null)
 			val (empty, user, epoch) = synchronized(lock) { Triple(state.result == null && !throttledLocked(), currentUserLocked(), state.epoch) }
 			if (drained.error == null && !drained.sentAny && empty)
 			{	// Nothing queued and no decision yet: ask for the visitor's current state (v1 did the same).
@@ -437,21 +496,22 @@ internal class Engine
 		if (error == null) current else PersonyzeResult(current.actions, current.conditions, current.dismissedActions, current.dismissedConditions, current.sessionId, current.cacheVersion, current.rawJson, error)
 	}
 
-	/**	Send what is queued, now. **/
+	/**	Send what is queued, now - what can go: events with no live session of their visitor's wait
+		for the next navigation ([takeBatchLocked]).
+	 **/
 	suspend fun flush(): Unit = withContext(io) {
 		loaded.await()
 		val deadline = platform.monotonicMs() + config.backgroundTimeoutMs
-		underWire(deadline) { drain(deadline, live = false, operation = "flush", navSeq = null) }
+		underWire(deadline) { drain(deadline, operation = "flush", navSeq = null) }
 	}
 
-	/**	Send what is queued if it can go into the live session - otherwise it waits for the next
-		navigation, which opens the new session with a page. Events sent alone into a new session
-		would log a visit with no page. Answers false when events stayed for lack of a network.
+	/**	[flush] within [budgetMs], from the background. Answers false when events stayed for lack of
+		a network.
 	 **/
 	suspend fun flushLive(budgetMs: Long, operation: String): Boolean = withContext(io) {
 		loaded.await()
 		val deadline = platform.monotonicMs() + budgetMs
-		val drained = underWire(deadline) { drain(deadline, live = true, operation = operation, navSeq = null) }
+		val drained = underWire(deadline) { drain(deadline, operation = operation, navSeq = null) }
 		drained != null && !drained.keptForLater
 	}
 
@@ -479,7 +539,7 @@ internal class Engine
 
 	fun hasPending(): Boolean = synchronized(lock) { pending.any { !it.navigate } }
 
-	private class Batch(val items: List<PendingItem>, val user: JsonPrimitive, val epoch: Int)
+	private class Batch(val items: List<PendingItem>, val visitor: Identity, val epoch: Int)
 	{	val hasNavigate: Boolean = items.any { it.navigate }
 	}
 
@@ -494,10 +554,10 @@ internal class Engine
 	/**	Send the queue in order, a batch per request, until it is empty or a request fails. Called
 		holding [wire].
 	 **/
-	private suspend fun drain(deadline: Long, live: Boolean, operation: String, navSeq: Long?): Drained
+	private suspend fun drain(deadline: Long, operation: String, navSeq: Long?): Drained
 	{	val drained = Drained()
 		while (true)
-		{	val batch = synchronized(lock) { takeBatchLocked(live, operation, navSeq) } ?: break
+		{	val batch = synchronized(lock) { takeBatchLocked(operation, navSeq) } ?: break
 			persistNow()
 			val error = sendBatch(batch, deadline, operation)
 			drained.sentAny = true
@@ -536,9 +596,20 @@ internal class Engine
 		  live one - sending them would open a session for a visitor who left;
 		* action reports outside the session they were made in: "executed" counted in a session that
 		  never showed the action;
+		* events queued before `startNewSession()` whose session is not live: no page of their
+		  session will come;
 		* anything a day old.
+
+		**Events with no page view to belong to wait.** A request with no navigation goes only into a
+		live session of its visitor's (SPEC sections 1 and 11). Sent alone, its events were refused
+		("Events not logged: this session has no page view", a 500) - and, for a visitor the server
+		replaces (a new install on an account that mints 64-bit ids, a 64-bit visitor on one that no
+		longer takes them), not logged, answered 200: lost without a word. Until 3.0 only the
+		automatic send held them; `flush()` and `refresh()` sent them alone. They wait in the queue
+		for the visitor's next navigation, which takes them along; what can go meanwhile goes past
+		them - the navigation itself, when they do not fit in its request.
 	 **/
-	private fun takeBatchLocked(live: Boolean, operation: String, navSeq: Long?): Batch?
+	private fun takeBatchLocked(operation: String, navSeq: Long?): Batch?
 	{	if (throttledLocked())
 		{	return null
 		}
@@ -552,10 +623,10 @@ internal class Engine
 			if (item.inflight || item.navigate)
 			{	continue
 			}
-			val ownSession = Session.isSessionOf(state.session, userValue(item.user)) && state.session != null
-			val liveOwnSession = ownSession && !Session.isExpired(state.session, serverNow) && item.epoch == state.sentEpoch
+			val liveOwnSession = isLiveSessionOfLocked(item, serverNow)
 			val reason = when
-			{	item.user != current && !liveOwnSession -> Reason.OTHER_VISITOR
+			{	item.identity != current && !liveOwnSession -> Reason.OTHER_VISITOR
+				item.epoch < state.epoch && !liveOwnSession -> Reason.OTHER_SESSION
 				Commands.isActionStatus(item.cmd) && item.cmd[2] != "dont-show" && item.sessionStart != 0L && (!liveOwnSession || Session.startTime(state.session) != item.sessionStart) -> Reason.OTHER_SESSION
 				now - item.queuedAtMs > MAX_AGE_MS -> Reason.EXPIRED
 				else -> null
@@ -571,45 +642,54 @@ internal class Engine
 				PersonyzeErrorContext(operation, dropped = items.size)
 			)
 		}
-		val first = pending.firstOrNull { !it.inflight } ?: return null
-		if (first.navigate && first.seq != navSeq)
-		{	return null	// another caller's navigation, waiting for its turn: it sends from here on
+		var from = pending.indexOfFirst { !it.inflight }
+		while (from != -1)
+		{	val first = pending[from]
+			if (first.navigate && first.seq != navSeq)
+			{	return null	// another caller's navigation, waiting for its turn: it sends from here on
+			}
+			val items = ArrayList<PendingItem>()
+			var size = BODY_OVERHEAD
+			var end = from
+			for (i in from until pending.size)
+			{	val item = pending[i]
+				if (item.inflight)
+				{	continue
+				}
+				if (item.navigate && item.seq != navSeq)
+				{	break
+				}
+				if (item.identity != first.identity || item.epoch != first.epoch || item.raw != first.raw || (first.raw && items.isNotEmpty()))
+				{	break
+				}
+				val len = Commands.jsonLength(item.cmd) + 1
+				if (items.isNotEmpty() && size + len > Commands.MAX_BODY)
+				{	break
+				}
+				// The events after a navigation go in its request, attributed to the new screen.
+				items.add(item)
+				size += len
+				end = i
+			}
+			if (items.any { it.navigate } || isLiveSessionOfLocked(first, serverNow))
+			{	val ids = items.mapTo(HashSet()) { it.seq }
+				for (i in pending.indices)
+				{	if (pending[i].seq in ids)
+					{	pending[i] = pending[i].copy(inflight = true)
+					}
+				}
+				return Batch(items.map { it.copy(inflight = true) }, first.identity, first.epoch)
+			}
+			// No page view to belong to: they wait, and what comes after them may go.
+			from = (end + 1 until pending.size).firstOrNull { !pending[it].inflight } ?: -1
 		}
-		if (live)
-		{	val liveSession = state.session != null && Session.isSessionOf(state.session, userValue(first.user)) &&
-				!Session.isExpired(state.session, serverNow) && first.epoch == state.sentEpoch
-			if (!liveSession)
-			{	return null
-			}
-		}
-		val items = ArrayList<PendingItem>()
-		var size = BODY_OVERHEAD
-		for (item in pending)
-		{	if (item.inflight)
-			{	continue
-			}
-			if (item.navigate && item.seq != navSeq)
-			{	break
-			}
-			if (item.user != first.user || item.epoch != first.epoch || item.raw != first.raw || (first.raw && items.isNotEmpty()))
-			{	break
-			}
-			val len = Commands.jsonLength(item.cmd) + 1
-			if (items.isNotEmpty() && size + len > Commands.MAX_BODY)
-			{	break
-			}
-			// The events after a navigation go in its request, attributed to the new screen.
-			items.add(item)
-			size += len
-		}
-		val ids = items.mapTo(HashSet()) { it.seq }
-		for (i in pending.indices)
-		{	if (pending[i].seq in ids)
-			{	pending[i] = pending[i].copy(inflight = true)
-			}
-		}
-		return Batch(items.map { it.copy(inflight = true) }, first.user, first.epoch)
+		return null
 	}
+
+	/**	Whether [item] may go into the live session: one of its visitor's, not expired, of its epoch. **/
+	private fun isLiveSessionOfLocked(item: PendingItem, serverNow: Long): Boolean =
+		state.session != null && Session.isSessionOf(state.session, item.identity.visitorId) &&
+			!Session.isExpired(state.session, serverNow) && item.epoch == state.sentEpoch
 
 	private class Sent(val body: String, val session: String?, val newSession: Boolean)
 
@@ -619,7 +699,7 @@ internal class Engine
 		val showable = platform.notificationsShowable()
 		val sent = synchronized(lock) {
 			var session = state.session
-			if (!Session.isSessionOf(session, userValue(batch.user)))
+			if (!Session.isSessionOf(session, batch.visitor.visitorId))
 			{	session = null
 			}
 			val serverNow = platform.nowMs() + state.clockOffsetMs
@@ -627,7 +707,8 @@ internal class Engine
 			// Newest first, the current session included - as the web tag sends them (stat-track-lib
 			// `get_ps`) and as the rule engine counts them (`pastSessionsCount` reads from the front).
 			val past = if (newSession) (listOf(serverNow/1000) + state.pastSessions).take(PAST_SESSIONS) else state.pastSessions
-			Sent(Wire.requestBody(batch.user, session, newSession, past, device, showable, batch.items.map { it.cmd }), session, newSession)
+			val visitorNew = installVisitorNew && isInstallVisitorLocked(batch.visitor)
+			Sent(Wire.requestBody(batch.visitor, visitorNew, session, newSession, past, device, showable, batch.items.map { it.cmd }), session, newSession)
 		}
 		val remaining = deadline - platform.monotonicMs()
 		val outcome = if (remaining <= 0)
@@ -664,70 +745,173 @@ internal class Engine
 	}
 
 	private fun applyResponse(batch: Batch, sent: Sent, response: Wire.TrackerResponse, dateMs: Long?)
-	{	synchronized(lock) {
-			var st = state
-			if (dateMs != null)
-			{	val offset = dateMs - platform.nowMs()
-				st = st.copy(clockOffsetMs = if (kotlin.math.abs(offset) > CLOCK_SKEW_MS) offset else 0)
+	{	// [persistLock] across the state's change and both writes - the adopted visitor first, then the
+		// state with the session that came with it (SPEC section 1, "saved with its session"): a persist
+		// asked for meanwhile, by a call of the app's on any thread, waits. Without it the background
+		// save could write the new session, and the queue tagged for the new id, before the id itself
+		// (the independent review of the port, minor 2).
+		val adopted = synchronized(persistLock) {
+			val visitorFile = synchronized(lock) { applyResponseLocked(batch, sent, response, dateMs) }
+			if (visitorFile != null)
+			{	// Cut between the two writes, the new visitor finds the old one's state, which load()
+				// gives to it (the queue, the shown-message record) or does not send for it (the
+				// session): the same visitor, a new session.
+				saveVisitorFile(visitorFile)
+				persistNow()
 			}
-			// Always the newest (SPEC section 3, rule 2) - v1 kept the first of each session.
-			val session = response.sessionId ?: sent.session
-			val started = session != null && Session.startTime(session) != Session.startTime(sent.session)
-			if (started)
-			{	val start = Session.startTime(session)
-				st = st.copy(
-					blocked = st.blocked.mapValues { it.value - 1 }.filterValues { it > 0 },
-					pastSessions = (listOf(start) + st.pastSessions.filter { it != start }).take(PAST_SESSIONS),
-					pageReports = if (batch.hasNavigate) st.pageReports else emptyMap()
-				)
-			}
-			st = st.copy(session = session, sentEpoch = maxOf(st.sentEpoch, batch.epoch))
-			if (response.cacheVersion > 0 && response.cacheVersion != st.cacheVersion)
-			{	metadata = MetadataFile(apiKeyFp = apiKeyFp, cacheVersion = response.cacheVersion)
-				st = st.copy(cacheVersion = response.cacheVersion)
-				cacheStore.delete(METADATA)
-			}
-			val blockedHit = response.actions.filter { it.id in st.blocked }.map { it.id }
-			val decided = response.actions.filter { it.id !in st.blocked }
-			if (batch.user == currentUserLocked())
-			{	val prev = st.result
-				st = st.copy(
-					result = if (batch.hasNavigate || prev == null)
-					{	PersistedResult(
-							conditions = response.conditions.distinct(),
-							actions = decided.distinctBy { it.id }.map { PersistedAction(it.id, it.data) },
-							sessionId = session,
-							cacheVersion = st.cacheVersion,
-							raw = response.raw
-						)
-					}
-					else
-					{	// Merge, as v1: what is new is added, what Personyze dismissed is removed.
-						val conditions = (prev.conditions + response.conditions.filter { it !in prev.conditions }).filter { it !in response.dismissConditions }
-						val known = prev.actions.mapTo(HashSet()) { it.id }
-						val actions = (prev.actions + decided.filter { it.id !in known }.map { PersistedAction(it.id, it.data) }).filter { it.id !in response.dismissActions }
-						PersistedResult(conditions.distinct(), actions.distinctBy { it.id }, response.dismissConditions, response.dismissActions, session, st.cacheVersion, response.raw)
-					}
-				)
-			}
-			state = st
-			val ids = batch.items.mapTo(HashSet()) { it.seq }
-			pending.removeAll { it.seq in ids }
-			for (id in blockedHit)
-			{	addLocked(Commands.actionStatus(id, "dont-show"), raw = false)
-			}
-			if (blockedHit.isNotEmpty())
-			{	scheduleAutoFlushLocked()
-			}
-			emitLocked()
+			visitorFile != null
 		}
-		persistSoon()
+		if (!adopted)
+		{	persistSoon()
+		}
 		if (needsMetadata())
 		{	scope.launch(io) { fetchMetadata(config.backgroundTimeoutMs) }
 		}
 		// The visitor may be new to Personyze, or another: the device registered for them.
 		if (synchronized(lock) { state.push.token != null })
 		{	scope.launch(io) { registerPush() }
+		}
+	}
+
+	/**	The answer, into the state. Answers the `visitor` file's new text when the install's visitor
+		changed - named, or another - else null.
+	 **/
+	private fun applyResponseLocked(batch: Batch, sent: Sent, response: Wire.TrackerResponse, dateMs: Long?): String?
+	{	var st = state
+		if (dateMs != null)
+		{	val offset = dateMs - platform.nowMs()
+			st = st.copy(clockOffsetMs = if (kotlin.math.abs(offset) > CLOCK_SKEW_MS) offset else 0)
+		}
+		// What an answer to the install's anonymous visitor names it (SPEC section 1): `pz_visitor_id`
+		// - or, from a server before protocol 2, which took the request for a new random visitor,
+		// field 1 of the session it answered (a safety net only).
+		val named = if (isInstallVisitorLocked(batch.visitor)) response.pzVisitorId ?: Session.visitor(response.sessionId) else null
+		val replaced = named != null && named != installVisitor
+		// Always the newest (SPEC section 3, rule 2) - v1 kept the first of each session. A replaced
+		// visitor's is the answer's exactly: the session sent was the other one's, and a request with
+		// no page opened none (the review, minor 4: the new id was shown beside the old session).
+		val session = if (replaced) response.sessionId else response.sessionId ?: sent.session
+		val started = session != null && Session.startTime(session) != Session.startTime(sent.session)
+		if (started)
+		{	val start = Session.startTime(session)
+			st = st.copy(
+				blocked = st.blocked.mapValues { it.value - 1 }.filterValues { it > 0 },
+				pastSessions = (listOf(start) + st.pastSessions.filter { it != start }).take(PAST_SESSIONS),
+				pageReports = if (batch.hasNavigate) st.pageReports else emptyMap()
+			)
+		}
+		st = st.copy(session = session, sentEpoch = maxOf(st.sentEpoch, batch.epoch))
+		if (response.idBits != null)
+		{	st = st.copy(idBits = response.idBits)
+		}
+		if (response.cacheVersion > 0 && response.cacheVersion != st.cacheVersion)
+		{	metadata = MetadataFile(apiKeyFp = apiKeyFp, cacheVersion = response.cacheVersion)
+			st = st.copy(cacheVersion = response.cacheVersion)
+			cacheStore.delete(METADATA)
+		}
+		val blockedHit = response.actions.filter { it.id in st.blocked }.map { it.id }
+		val decided = response.actions.filter { it.id !in st.blocked }
+		if (batch.visitor == currentUserLocked())
+		{	val prev = st.result
+			st = st.copy(
+				result = if (batch.hasNavigate || prev == null)
+				{	PersistedResult(
+						conditions = response.conditions.distinct(),
+						actions = decided.distinctBy { it.id }.map { PersistedAction(it.id, it.data) },
+						sessionId = session,
+						cacheVersion = st.cacheVersion,
+						raw = response.raw
+					)
+				}
+				else
+				{	// Merge, as v1: what is new is added, what Personyze dismissed is removed.
+					val conditions = (prev.conditions + response.conditions.filter { it !in prev.conditions }).filter { it !in response.dismissConditions }
+					val known = prev.actions.mapTo(HashSet()) { it.id }
+					val actions = (prev.actions + decided.filter { it.id !in known }.map { PersistedAction(it.id, it.data) }).filter { it.id !in response.dismissActions }
+					PersistedResult(conditions.distinct(), actions.distinctBy { it.id }, response.dismissConditions, response.dismissActions, session, st.cacheVersion, response.raw)
+				}
+			)
+		}
+		var adoptedFile: String? = null
+		if (named != null)
+		{	adoptLocked(st, named)?.let { adopted ->
+				st = adopted
+				adoptedFile = visitorFileLocked()
+			}
+		}
+		state = st
+		val ids = batch.items.mapTo(HashSet()) { it.seq }
+		if (replaced && response.sessionId == null && !batch.hasNavigate)
+		{	// SPEC section 1, "Events of a replaced visitor are not logged": the server took them for the
+			// other visitor's and logged nothing, answering 200 all the same. Not sent, then: kept -
+			// tagged for the new id by adoptLocked - for its next page (section 11).
+			for (i in pending.indices)
+			{	if (pending[i].seq in ids)
+				{	pending[i] = pending[i].copy(inflight = false)
+				}
+			}
+		}
+		else
+		{	pending.removeAll { it.seq in ids }
+		}
+		for (id in blockedHit)
+		{	addLocked(Commands.actionStatus(id, "dont-show"), raw = false)
+		}
+		if (blockedHit.isNotEmpty())
+		{	scheduleAutoFlushLocked()
+		}
+		emitLocked()
+		return adoptedFile
+	}
+
+	/**	What an answer to the install's anonymous visitor says of it (SPEC section 1): [named], the
+		visitor the request was logged under.
+
+		Named, the id is no longer new. Another id replaces the install's - a new visitor minted at 32
+		bits where the account mints 64, or one past 32 bits where the account no longer takes them -
+		and what waits on the device for the old one is the new one's: the queued events, the record
+		of the notifications shown (it is the same person). The push registration follows by itself:
+		it is for the visitor as it stands. Answers [st] with that done, or null when nothing changed.
+	 **/
+	private fun adoptLocked(st: PersistedState, named: Long): PersistedState?
+	{	val old = installVisitor
+		if (named == old)
+		{	if (!installVisitorNew)
+			{	return null
+			}
+			installVisitorNew = false
+			return st
+		}
+		installVisitor = named
+		installVisitorNew = false
+		val oldKey = old.toString()
+		val newKey = named.toString()
+		for (i in pending.indices)
+		{	if (pending[i].anonymous && pending[i].user.content == oldKey)
+			{	pending[i] = pending[i].copy(user = JsonPrimitive(newKey))
+			}
+		}
+		val delivered = st.notifications.delivered
+		val shown = delivered[oldKey] ?: return st
+		return st.copy(notifications = st.notifications.copy(delivered = (delivered - oldKey) + (newKey to shown)))
+	}
+
+	/**	Whether [visitor] is the install's anonymous visitor as it stands. **/
+	private fun isInstallVisitorLocked(visitor: Identity): Boolean = visitor.anonymous && visitor.user.content == installVisitor.toString()
+
+	/**	`visitor`: the install's id, and ` new` after it while no answer has named it - one file, so
+		the two are written in one step. Apart from state.json, and written at once: the visitor
+		outlives another account's state and a reset's wipe. 2.x wrote the id alone, and reads one
+		with ` new` as none - minting another, which only a visitor nobody has answered yet can be.
+	 **/
+	private fun visitorFileLocked(): String = visitorFileText(installVisitor, installVisitorNew)
+
+	private fun saveVisitorFile(text: String)
+	{	try
+		{	store.write(VISITOR, text, sync = true)
+		}
+		catch (e: Exception)
+		{	platform.log("Personyze: could not save the visitor: $e")
 		}
 	}
 
@@ -819,25 +1003,44 @@ internal class Engine
 		}
 		wire.withLock {
 			meta.withLock {
-				synchronized(lock) {
-					installVisitor = Random.nextInt(MIN_ANONYMOUS_ID, Int.MAX_VALUE)
-					state = PersistedState(apiKeyFp = apiKeyFp, push = PersistedPush(token = push.token))
+				// At the width the account last answered: the new visitor's id is the account's to keep.
+				val idBits = synchronized(lock) { state.idBits }
+				val minted = Session.mintVisitorId(idBits, random)
+				val visitorFile = synchronized(lock) {
+					installVisitor = minted
+					installVisitorNew = true
+					state = PersistedState(apiKeyFp = apiKeyFp, push = PersistedPush(token = push.token), idBits = idBits)
 					pending.clear()
 					metadata = MetadataFile(apiKeyFp = apiKeyFp)
 					emitLocked()
+					visitorFileLocked()
 				}
 				store.clear()
 				cacheStore.clear()
-				store.write(VISITOR, synchronized(lock) { installVisitor }.toString(), sync = true)
+				store.write(VISITOR, visitorFile, sync = true)
 				persistNow()
 			}
 		}
 	}
 
-	private fun currentUserLocked(): JsonPrimitive = state.userId ?: JsonPrimitive(installVisitor)
+	/**	The visitor a request made now is about: the app's user id, or the install's anonymous one. **/
+	private fun currentUserLocked(): Identity = state.userId?.let { Identity(it, anonymous = false) } ?: Identity.anonymous(installVisitor)
 
-	/**	The user id as the server reads it: text stays text, a number is a number. **/
-	private fun userValue(user: JsonPrimitive): Any = if (user.isString) user.content else user.content.toLongOrNull() ?: user.content
+	/**	The current visitor's id as the server has it (SPEC section 11) - for the notification check, the
+		push registration, [PersonyzeVisitor.visitorId]: the install's own id (the answer's
+		`pz_visitor_id` once one named another), or a login's as the server makes it of `user_id` - else,
+		when that names nobody, field 1 of the session the server answered. Never recomputed on the
+		device for the install's visitor: a 64-bit id is nobody's CRC-32. None for the install's before
+		an answer names it: the device's guess, which an account that mints 64-bit ids replaces - an
+		app that stored it would keep a visitor that never was (the review, minor 5).
+	 **/
+	private fun visitorIdLocked(): Long? = if (installVisitorNew && currentUserLocked().anonymous) null else deviceVisitorIdLocked()
+
+	/**	[visitorIdLocked] as the device files its own records (the notifications shown): the install's id
+		even before an answer names it - a message pushed then is still shown once. An adopted id takes
+		the record over (adoptLocked).
+	 **/
+	private fun deviceVisitorIdLocked(): Long? = currentUserLocked().visitorId ?: Session.visitor(state.session)
 
 	// ------------------------------------------------------------------------------------ metadata
 
@@ -952,7 +1155,7 @@ internal class Engine
 			}
 			// No request yet, no visitor on the server, nothing queued for one.
 			state.session ?: return@withContext null
-			val expected = Session.serverUserId(userValue(currentUserLocked())) ?: return@withContext null
+			val expected = visitorIdLocked() ?: return@withContext null
 			state = state.copy(notifications = n.copy(lastCheckMs = now))
 			Endpoints.notification(expected) to expected.toString()
 		}
@@ -1021,13 +1224,15 @@ internal class Engine
 				}
 				else
 				{	state.session ?: return@withLock
-					val visitor = Session.serverUserId(userValue(currentUserLocked())) ?: return@withLock
+					// None for an install's visitor not on the server yet: its answer may name another.
+					val visitor = visitorIdLocked() ?: return@withLock
 					val signature = "$visitor $token"
 					if (p.registered == signature && now < p.registeredAtMs + PUSH_REGISTER_AGAIN_MS)
 					{	return@withLock
 					}
 					buildJsonObject {
-						put("user_id", visitor)
+						// Text, as every visitor id (SPEC section 1): a 64-bit one is past what a double holds.
+						put("user_id", visitor.toString())
 						put("token", token)
 						put("platform", app.platform)
 						put("app_id", app.appId)
@@ -1057,7 +1262,7 @@ internal class Engine
 	suspend fun acceptPushed(notification: PersonyzeNotification): Boolean = withContext(io) {
 		loaded.await()
 		val show = synchronized(lock) {
-			val visitor = Session.serverUserId(userValue(currentUserLocked()))?.toString() ?: return@synchronized true
+			val visitor = deviceVisitorIdLocked()?.toString() ?: return@synchronized true
 			val n = state.notifications
 			if (n.delivered[visitor] == notification.messageId)
 			{	false
@@ -1126,7 +1331,7 @@ internal class Engine
 	/**	Tell the server the message was delivered, so it leaves the queue. Best effort. **/
 	suspend fun ackNotification(messageId: Long): Unit = withContext(io) {
 		val path = synchronized(lock) {
-			val expected = Session.serverUserId(userValue(currentUserLocked())) ?: return@withContext
+			val expected = visitorIdLocked() ?: return@withContext
 			Endpoints.notification(expected, messageId)
 		}
 		val outcome = rest.call("DELETE", path, null, config.backgroundTimeoutMs)
@@ -1156,10 +1361,9 @@ internal class Engine
 	private fun emitLocked()
 	{	emitPushLocked()
 		resultFlow.value = buildResultLocked()
-		val user = currentUserLocked()
 		visitorFlow.value = PersonyzeVisitor(
 			userId = state.userId?.content,
-			visitorId = Session.serverUserId(userValue(user)),
+			visitorId = visitorIdLocked(),
 			sessionId = state.session
 		)
 	}
@@ -1209,7 +1413,7 @@ internal class Engine
 	private fun persistNow()
 	{	synchronized(persistLock) {
 			val (st, ob) = synchronized(lock) {
-				Wire.json.encodeToString(PersistedState.serializer(), state) to
+				Wire.json.encodeToString(PersistedState.serializer(), state.copy(installVisitor = visitorFileLocked())) to
 					Wire.json.encodeToString(OutboxFile.serializer(), OutboxFile(items = pending.filter { !it.navigate }))
 			}
 			try
@@ -1253,7 +1457,7 @@ internal class Engine
 	/**	A redacted dump of the state, for a support case or a test screen. **/
 	fun diagnostics(): String = synchronized(lock) {
 		val sb = StringBuilder()
-		sb.append("installVisitor=").append(installVisitor).append('\n')
+		sb.append("installVisitor=").append(installVisitor).append(if (installVisitorNew) " (new: no answer has named it yet)" else "").append(" idBits=").append(state.idBits).append('\n')
 		sb.append("userId=").append(state.userId?.content).append('\n')
 		sb.append("session=").append(state.session).append('\n')
 		sb.append("  start=").append(Session.startTime(state.session)).append(" visitor=").append(Session.visitor(state.session)).append(" counter=").append(Session.counter(state.session)).append('\n')
@@ -1268,7 +1472,7 @@ internal class Engine
 		sb.append("throttledUntilMs=").append(state.throttledUntilMs).append('\n')
 		sb.append("queue (").append(pending.size).append("):\n")
 		for (item in pending)
-		{	sb.append("  ").append(item.cmd).append(" user=").append(item.user).append(" epoch=").append(item.epoch)
+		{	sb.append("  ").append(item.cmd).append(if (item.anonymous) " pz_visitor_id=" else " user_id=").append(item.user).append(" epoch=").append(item.epoch)
 			if (item.inflight) sb.append(" inflight")
 			sb.append('\n')
 		}
@@ -1281,8 +1485,23 @@ internal class Engine
 		const val VISITOR = "visitor"
 		const val METADATA = "metadata.json"
 
-		/**	Anonymous ids below this are reserved (SPEC section 10.1). **/
-		const val MIN_ANONYMOUS_ID = 500_000_000
+		/**	After the id in the `visitor` file while no answer has named it ([visitorFileLocked]). **/
+		const val NEW_MARK = "new"
+		private val WHITESPACE = Regex("\\s+")
+
+		fun visitorFileText(visitorId: Long, isNew: Boolean): String = if (isNew) "$visitorId $NEW_MARK" else visitorId.toString()
+
+		/**	[visitorFileText] read back: the id and whether it is new, or null for no id. 64 bits, and as
+			leniently as 2.x read the file - which read an Int, and minted a new visitor over a 64-bit one.
+		 **/
+		fun readVisitorFile(text: String?): Pair<Long, Boolean>?
+		{	val fields = text?.trim()?.split(WHITESPACE) ?: return null
+			val id = fields.first().toLongOrNull()?.takeIf { it != 0L && it != Long.MIN_VALUE } ?: return null
+			return id to (fields.getOrNull(1) == NEW_MARK)
+		}
+
+		/**	A navigation behind another caller's looks for its turn this often. **/
+		const val TURN_WAIT_MS = 20L
 		/**	The web tag keeps 12 (`WConf::$n_remember_past_sessions_time`); so did v1. **/
 		const val PAST_SESSIONS = 12
 		const val THROTTLE_MS = 10L*60_000

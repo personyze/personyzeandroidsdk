@@ -102,8 +102,10 @@ internal fun hang(): Step = {
 /**	A session string as the tracker builds it: start, visitor, visit, counter, last session, testing, hosts, social. **/
 internal fun session(startSec: Long, visitor: Long, counter: Int = 1): String = "$startSec $visitor 77 $counter $startSec 0 491,492 0"
 
-internal fun tracker(session: String?, cacheVersion: Int = 5, conditions: List<Int> = emptyList(), actions: String = "[]", dismissActions: List<Int> = emptyList(), dismissConditions: List<Int> = emptyList()): String =
-	"""{"session_id":${session?.let { "\"$it\"" } ?: "null"},"cache_version":$cacheVersion,"conditions":[${conditions.joinToString(",") { "{\"id\":$it}" }}],"actions":$actions,"dismiss_conditions":$dismissConditions,"dismiss_actions":$dismissActions}"""
+/**	The tracker's answer; with [pzVisitorId] and [idBits] a protocol 2 one (SPEC section 1). **/
+internal fun tracker(session: String?, cacheVersion: Int = 5, conditions: List<Int> = emptyList(), actions: String = "[]", dismissActions: List<Int> = emptyList(), dismissConditions: List<Int> = emptyList(), pzVisitorId: String? = null, idBits: Int? = null): String =
+	"""{"session_id":${session?.let { "\"$it\"" } ?: "null"},"cache_version":$cacheVersion,"conditions":[${conditions.joinToString(",") { "{\"id\":$it}" }}],"actions":$actions,"dismiss_conditions":$dismissConditions,"dismiss_actions":$dismissActions""" +
+		(pzVisitorId?.let { ",\"pz_visitor_id\":\"$it\"" } ?: "") + (idBits?.let { ",\"id_bits\":$it" } ?: "") + "}"
 
 internal fun JsonObject.commands(): List<List<String?>> =
 	this["commands"]!!.jsonArray.map { cmd -> cmd.jsonArray.map { (it as? JsonPrimitive)?.takeIf { p -> p.isString }?.content } }
@@ -111,6 +113,26 @@ internal fun JsonObject.commands(): List<List<String?>> =
 internal fun JsonObject.str(name: String): String? = (this[name] as? JsonPrimitive)?.takeIf { it.isString }?.content
 
 internal fun JsonObject.bool(name: String): Boolean = this[name]!!.jsonPrimitive.content == "true"
+
+/**	`pz_visitor_id`, or `user_id` - whichever names the request's visitor - as text. **/
+internal fun JsonObject.visitorField(): String = (this["pz_visitor_id"] ?: this["user_id"])!!.jsonPrimitive.content
+
+/**	Answers what a test scripts: [bytes] for the 64-bit draws, [ints] for the 32-bit ones (the
+	offset above 500,000,000) - then, once used up, at random.
+ **/
+internal class ScriptedRandom(bytes: List<String> = emptyList(), ints: List<Int> = emptyList()) : java.util.Random(1)
+{	private val bytes = ArrayDeque(bytes)
+	private val ints = ArrayDeque(ints)
+
+	override fun nextBytes(out: ByteArray)
+	{	val hex = bytes.removeFirstOrNull() ?: return super.nextBytes(out)
+		for (i in out.indices)
+		{	out[i] = hex.substring(i*2, i*2 + 2).toInt(16).toByte()
+		}
+	}
+
+	override fun nextInt(bound: Int): Int = ints.removeFirstOrNull() ?: super.nextInt(bound)
+}
 
 /**	[errors] fill asynchronously: read them after `advanceUntilIdle()`. **/
 internal class Harness
@@ -130,7 +152,8 @@ internal fun TestScope.harness
 	autoFlushMs: Long? = null,
 	timeoutMs: Long = 5000,
 	apiKey: String = KEY,
-	platform: FakePlatform = FakePlatform(testScheduler)
+	platform: FakePlatform = FakePlatform(testScheduler),
+	random: java.util.Random = ScriptedRandom()
 ): Harness
 {	val errors = Collections.synchronizedList(ArrayList<Pair<PersonyzeException, PersonyzeErrorContext>>())
 	val dispatcher = StandardTestDispatcher(testScheduler)
@@ -148,7 +171,8 @@ internal fun TestScope.harness
 		dispatcher,
 		legacy,
 		{ e, c -> errors.add(e to c) },
-		{ null }
+		{ null },
+		random
 	)
 	return Harness(engine, transport, platform, store, cache, errors)
 }

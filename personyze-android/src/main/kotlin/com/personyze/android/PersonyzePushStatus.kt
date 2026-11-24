@@ -13,8 +13,8 @@ package com.personyze.android
 public class PersonyzePushStatus internal constructor
 (	/**	The token the app passed on, or null. **/
 	public val token: String?,
-	/**	The visitor Personyze has this device registered for, or null. **/
-	public val registeredVisitorId: Int?,
+	/**	The visitor Personyze has this device registered for, or null - a [PersonyzeVisitor.visitorId], 64 bits since 3.0. **/
+	public val registeredVisitorId: Long?,
 	/**	When it was last registered, ms since the epoch; 0 for never. **/
 	public val registeredAtMs: Long,
 	/**	Whether Personyze pushes to this device: the account has its key for the platform. **/
@@ -22,7 +22,7 @@ public class PersonyzePushStatus internal constructor
 )
 {	override fun equals(other: Any?): Boolean =
 		other is PersonyzePushStatus && token == other.token && registeredVisitorId == other.registeredVisitorId && registeredAtMs == other.registeredAtMs && pushed == other.pushed
-	override fun hashCode(): Int = 31*(31*(31*(token?.hashCode() ?: 0) + (registeredVisitorId ?: 0)) + registeredAtMs.hashCode()) + pushed.hashCode()
+	override fun hashCode(): Int = 31*(31*(31*(token?.hashCode() ?: 0) + (registeredVisitorId?.hashCode() ?: 0)) + registeredAtMs.hashCode()) + pushed.hashCode()
 	/**	The token cut short: enough to tell two devices apart in a log. **/
 	override fun toString(): String = "PersonyzePushStatus(token=${token?.let { it.take(10) + "… (${it.length})" }}, registeredVisitorId=$registeredVisitorId, registeredAtMs=$registeredAtMs, pushed=$pushed)"
 }

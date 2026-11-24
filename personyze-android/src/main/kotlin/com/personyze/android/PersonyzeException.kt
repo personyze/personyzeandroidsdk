@@ -68,7 +68,9 @@ public sealed class PersonyzeException(message: String, cause: Throwable? = null
 			EXPIRED,
 			/**	The events belonged to a visitor who is no longer the current one. **/
 			OTHER_VISITOR,
-			/**	An action report belonged to a session that has ended. **/
+			/**	An action report, or an event queued before [com.personyze.android.PersonyzeApi.startNewSession],
+				belonged to a session that has ended.
+			 **/
 			OTHER_SESSION,
 			/**	Too many events were waiting; the oldest were dropped. **/
 			OVERFLOW,

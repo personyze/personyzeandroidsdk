@@ -7,27 +7,90 @@ import java.util.zip.CRC32
 
 	The session string is opaque except for two fields: 0, the session's start (a Unix time), and
 	1, the visitor it belongs to. Everything else (visit id, counter, hosts) is the server's.
+
+	**A visitor id is a signed 64-bit number** (SPEC section 1, protocol 2; SDK 3.0, 2026-11): held
+	as a [Long] or as its decimal text, never as a [Double] - past 2^53 a double is another visitor's
+	id. Up to 2.x it was read as ten digits at most, so a session of a 64-bit visitor (an account
+	that mints them, since 2026-11) had no visitor, and the install's id was an [Int].
  **/
 internal object Session
 {	/**	The server's own session timeout. **/
 	const val TTL_MS: Long = 90L*60_000
 	/**	Renew a session about to expire deliberately, rather than have it rejected in flight. **/
 	const val EXPIRY_MARGIN_MS: Long = 5000
+	/**	32-bit anonymous ids below this are reserved (SPEC section 10.1): the server's own, and the
+		tag's of old.
+	 **/
+	const val MIN_ANONYMOUS_ID = 500_000_000
+	/**	A 64-bit id is minted in [-2^63+1, -2^31) or [2^62, 2^63-1] (SPEC section 3), where nothing
+		else mints: below is the server's range and the 32-bit ids of old.
+	 **/
+	private const val MINTED_HIGH_FROM = 1L shl 62
+	private const val MINTED_LOW_BELOW = -(1L shl 31)
 
 	/**	Width-limited: a corrupted `99999999999999999999 …` must read as garbage (expired), not as a
 		start far in the future that never expires - that answers `400 Invalid session_id` forever.
 	 **/
 	private val RE_START = Regex("^\\s*(\\d{1,10})(?:\\s|$)")
-	private val RE_VISITOR = Regex("^-?\\d{1,10}$")
+	/**	A visitor id as the server writes it (`user_id.ts` `parseUserId`): no `+`, no leading zeros,
+		never 0. Within 64 bits is [visitorId]'s to check.
+	 **/
+	private val RE_VISITOR = Regex("^-?[1-9]\\d{0,18}$")
 
 	/**	Field 0 in seconds, or 0 for anything that is not one. **/
 	fun startTime(sessionId: String?): Long =
 		sessionId?.let { RE_START.find(it)?.groupValues?.get(1)?.toLong() } ?: 0
 
-	/**	Field 1: the visitor the session belongs to, or null when it holds none. **/
-	fun visitor(sessionId: String?): Long?
-	{	val field = sessionId?.split(' ')?.getOrNull(1) ?: return null
-		return if (RE_VISITOR.matches(field)) field.toLong() else null
+	/**	Field 1: the visitor the session belongs to, or null when it holds none - or none the server
+		writes (`0`, leading zeros, past 64 bits), which protocol 2 refuses (SPEC section 3).
+	 **/
+	fun visitor(sessionId: String?): Long? = visitorId(fieldOne(sessionId))
+
+	/**	Field 1 of a session string - one whose field 0, the start, reads as a number (SPEC section 3).
+		Null for anything else: it is left to the expiry rule.
+	 **/
+	private fun fieldOne(sessionId: String?): String?
+	{	val fields = sessionId?.split(' ') ?: return null
+		return if (fields.size >= 2 && RE_DIGITS.matches(fields[0])) fields[1] else null
+	}
+
+	private val RE_DIGITS = Regex("\\d+")
+
+	/**	A visitor id written canonically - field 1 of a session, an answer's `pz_visitor_id` - or null:
+		a signed decimal of up to 19 digits within 64 bits, -2^63 excluded (nothing mints it).
+	 **/
+	fun visitorId(text: String?): Long?
+	{	if (text == null || !RE_VISITOR.matches(text))
+		{	return null
+		}
+		return text.toLongOrNull()?.takeIf { it != Long.MIN_VALUE }
+	}
+
+	/**	A minted 64-bit id from 8 random bytes, big-endian two's complement - or null where nothing
+		mints, and the caller draws again. The server's `userIdFromBytes`, to the vector.
+	 **/
+	fun visitorIdFromBytes(b: ByteArray): Long?
+	{	require(b.size == 8) { "8 bytes expected, not ${b.size}" }
+		var v = 0L
+		for (x in b)
+		{	v = (v shl 8) or (x.toLong() and 0xFF)
+		}
+		return v.takeIf { it >= MINTED_HIGH_FROM || (it < MINTED_LOW_BELOW && it != Long.MIN_VALUE) }
+	}
+
+	/**	A new anonymous visitor at the width the last answer's `id_bits` said (SPEC section 3): 32
+		bits a random number in 500,000,000..2^31-1, as the SDK always minted; 64 bits 8 bytes of
+		[random] (a `SecureRandom`, but for tests) drawn until [visitorIdFromBytes] takes them.
+	 **/
+	fun mintVisitorId(bits: Int, random: java.util.Random): Long
+	{	if (bits == 64)
+		{	val b = ByteArray(8)
+			while (true)
+			{	random.nextBytes(b)
+				visitorIdFromBytes(b)?.let { return it }
+			}
+		}
+		return MIN_ANONYMOUS_ID.toLong() + random.nextInt(Int.MAX_VALUE - MIN_ANONYMOUS_ID + 1)
 	}
 
 	/**	Field 3, the session counter: 1 for the visitor's first session. Read only by diagnostics
@@ -38,19 +101,23 @@ internal object Session
 	fun isExpired(sessionId: String?, serverNowMs: Long): Boolean =
 		sessionId.isNullOrEmpty() || startTime(sessionId)*1000 + TTL_MS - EXPIRY_MARGIN_MS <= serverNowMs
 
-	/**	Whether [sessionId] may be sent for [userId]: false only when it surely belongs to another
-		visitor. Anything that cannot be told either way is left to the expiry rule.
+	/**	Whether [sessionId] may be sent for the visitor the server makes of the request, [expected]
+		([Identity.visitorId]): false when it surely belongs to another visitor - or to none the server
+		writes, which protocol 2 answers `400 Invalid session_id`. A session with no field 1, or a
+		request whose visitor cannot be told, is left to the expiry rule.
 	 **/
-	fun isSessionOf(sessionId: String?, userId: Any?): Boolean
-	{	val owner = visitor(sessionId) ?: return true
-		val expected = serverUserId(userId) ?: return true
-		return owner == expected.toLong()
+	fun isSessionOf(sessionId: String?, expected: Long?): Boolean
+	{	val field = fieldOne(sessionId) ?: return true
+		val owner = visitorId(field) ?: return false
+		return expected == null || owner == expected
 	}
 
-	/**	The visitor id the server makes of `user_id` (`LogVisitRequest.fromSdkTracker`): what
-		JavaScript's `Number()` reads as a non-zero 32-bit integer is that integer; anything else the
-		CRC-32 of its text in UTF-8, as a signed 32-bit integer. Null for no id, and for a number with
-		a fraction, which the server keeps as it is.
+	/**	The visitor id the server makes of `user_id` (`sdkUserIdOf`, the same in both protocols): what
+		JavaScript's `Number()` reads as a non-zero 32-bit integer is that integer; anything else -
+		`12.5` too - the CRC-32 of its text in UTF-8, as a signed 32-bit integer. Null for no id, and
+		for a CRC-32 of 0, which names nobody (the server mints a visitor of its own). Until SDK 3.0 a
+		fraction was null here (the server kept it as it was, and MySQL rounded it); `sdkV1` in the
+		server's `user_id_vectors.json` holds it now.
 	 **/
 	fun serverUserId(userId: Any?): Int?
 	{	val text = when (userId)
@@ -67,12 +134,12 @@ internal object Session
 			is Long -> userId.toDouble()
 			else -> jsNumber(text).let { if (it.isNaN()) 0.0 else it }
 		}
-		if (n != 0.0 && n >= Int.MIN_VALUE && n <= Int.MAX_VALUE)
-		{	return if (n == Math.floor(n)) n.toInt() else null
+		if (n != 0.0 && n >= Int.MIN_VALUE && n <= Int.MAX_VALUE && n == Math.floor(n))
+		{	return n.toInt()
 		}
 		val crc = CRC32()
 		crc.update(utf8(text))
-		return crc.value.toInt()
+		return crc.value.toInt().takeIf { it != 0 }
 	}
 
 	/**	JavaScript's `Number(string)` (ECMA-262 StringToNumber): trimmed; empty is 0; `0x`/`0o`/`0b`

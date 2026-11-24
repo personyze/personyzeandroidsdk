@@ -49,9 +49,13 @@ class EngineTest
 		val b = h.transport.bodies().single()
 		assertNull(b.str("session_id"))
 		assertTrue(b.bool("new_session"))
-		val userId = b["user_id"]!!.jsonPrimitive
-		assertFalse(userId.isString)
-		assertTrue("anonymous ids are >= 500,000,000", userId.content.toLong() >= 500_000_000)
+		// Protocol 2: the install's visitor as text, new until an answer names it - never as user_id.
+		assertEquals(2, b["protocol"]!!.jsonPrimitive.content.toInt())
+		assertNull(b["user_id"])
+		val userId = b["pz_visitor_id"]!!.jsonPrimitive
+		assertTrue(userId.isString)
+		assertTrue(b.bool("pz_visitor_new"))
+		assertTrue("the first run mints 32 bits, >= 500,000,000", userId.content.toLong() in 500_000_000..Int.MAX_VALUE.toLong())
 		assertEquals(listOf(nav("Home")), b.commands())
 		assertEquals("Android", b.str("platform"))
 		assertEquals("Android/14", b.str("os"))
@@ -64,6 +68,7 @@ class EngineTest
 		assertEquals("${T0/1000}", b.str("past_sessions"))
 		assertEquals(userId.content.toLong(), Session.visitor(r.sessionId))
 		assertEquals(r.sessionId, h.engine.visitor.value.sessionId)
+		assertEquals(userId.content.toLong(), h.engine.visitor.value.visitorId)
 	}
 
 	/**	Conformance step 7: three decisions in a row keep one session (counter stays 1). **/
@@ -125,18 +130,23 @@ class EngineTest
 		assertTrue(body.bool("new_session"))
 		assertEquals("777", body["user_id"]!!.jsonPrimitive.content)
 		assertEquals(777L, Session.visitor(b.sessionId))
-		assertEquals(777, h.engine.visitor.value.visitorId)
+		assertEquals(777L, h.engine.visitor.value.visitorId)
 	}
 
 	@Test fun logoutReturnsToTheInstallVisitor() = runTest {
 		val (h, _) = trackerHarness()
 		h.engine.navigate("Home", null)
-		val install = h.transport.bodies()[0]["user_id"]!!.jsonPrimitive.content
+		val install = h.transport.bodies()[0].str("pz_visitor_id")
 		h.engine.setUserId("bob")
 		h.engine.navigate("Home", null)
 		h.engine.setUserId(null)
 		h.engine.navigate("Home", null)
-		assertEquals(listOf(install, "bob", install), h.transport.bodies().map { it["user_id"]!!.jsonPrimitive.content })
+		val bodies = h.transport.bodies()
+		assertEquals(listOf(install, "bob", install), bodies.map { it.visitorField() })
+		// The login as user_id, exactly as version 1 sent it; never beside pz_visitor_id.
+		assertEquals(listOf(false, true, false), bodies.map { it.containsKey("user_id") })
+		assertEquals(listOf(true, false, true), bodies.map { it.containsKey("pz_visitor_id") })
+		assertNull("named by the first answer", bodies[2]["pz_visitor_new"])
 	}
 
 	@Test fun bigLongUserIdGoesAsText() = runTest {
@@ -193,7 +203,7 @@ class EngineTest
 		h.engine.flush()
 		val sent = h.transport.bodies().drop(1)
 		assertTrue(sent.size >= 3)
-		assertTrue(sent.all { Wire.requestBody(JsonPrimitive(1), null, false, emptyList(), h.platform.device, false, it.commands()).length <= Commands.MAX_BODY })
+		assertTrue(sent.all { Wire.requestBody(Identity.anonymous(1), true, null, false, emptyList(), h.platform.device, false, it.commands()).length <= Commands.MAX_BODY })
 		assertEquals((1..30).map { "f$it" }, sent.flatMap { it.commands() }.map { it[1] })
 	}
 
@@ -229,8 +239,19 @@ class EngineTest
 		assertEquals(1, h.transport.requests.size)
 	}
 
+	/**	A tracker that answers the first request as the real one, and [then] after it: events go
+		into a live session (they wait for a navigation otherwise), so a test of what happens to them
+		navigates first.
+	 **/
+	private fun TestScope.liveHarness(vararg then: Step): Harness
+	{	val platform = FakePlatform(testScheduler)
+		val tracker = FakeTracker { platform.nowMs()/1000 }
+		return harness(transport = FakeTransport().tracker(tracker.step(), *then), platform = platform)
+	}
+
 	@Test fun badRequestDropsTheBatch() = runTest {
-		val h = harness(transport = FakeTransport().tracker(status(400, "No Product ID specified")))
+		val h = liveHarness(status(400, "No Product ID specified"))
+		h.engine.navigate("Home", null)
 		h.engine.enqueue { Commands.raw(listOf("Product Viewed", "")) }
 		h.engine.flush()
 		advanceUntilIdle()
@@ -270,21 +291,23 @@ class EngineTest
 	}
 
 	@Test fun offlineKeepsTheEvents() = runTest {
-		val h = harness(transport = FakeTransport().tracker({ HttpOutcome.Failed(sent = false, timedOut = false, offline = true, cause = null) }))
+		val h = liveHarness({ HttpOutcome.Failed(sent = false, timedOut = false, offline = true, cause = null) })
+		h.engine.navigate("Home", null)
 		h.engine.enqueue { Commands.product("Product Viewed", "A1", null, null) }
 		h.engine.flush()
 		assertTrue(h.engine.hasPending())
-		assertEquals(1, h.transport.requests.size)
+		assertEquals(2, h.transport.requests.size)
 	}
 
 	/**	Maybe delivered: not sent again (a purchase counted twice is worse than one missing). **/
 	@Test fun ambiguousFailureDropsAndReportsTheEvents() = runTest {
-		val h = harness(transport = FakeTransport().tracker(fail(sent = true), fail(sent = true)))
+		val h = liveHarness(fail(sent = true), fail(sent = true))
+		h.engine.navigate("Home", null)
 		h.engine.enqueue { Commands.product("Product Purchased", "A1", 88, 1) }
 		h.engine.flush()
 		advanceUntilIdle()
 		assertFalse(h.engine.hasPending())
-		assertEquals(2, h.transport.requests.size)
+		assertEquals(3, h.transport.requests.size)
 		val e = h.errors.single().first as PersonyzeException.Delivery
 		assertEquals(Reason.AMBIGUOUS, e.reason)
 		assertEquals(listOf(listOf("Product Purchased", "A1", "action_id", "88", "quantity", "1")), e.commands)
@@ -344,12 +367,13 @@ class EngineTest
 	@Test fun previousVisitorsEventsGoUnderTheirOwnLiveSession() = runTest {
 		val (h, _) = trackerHarness()
 		h.engine.navigate("Home", null)
-		val anonymous = h.transport.bodies()[0]["user_id"]!!.jsonPrimitive.content
+		val anonymous = h.transport.bodies()[0].str("pz_visitor_id")
 		h.engine.enqueue { Commands.product("Product Viewed", "A1", null, null) }
 		h.engine.setUserId("dave")
 		h.engine.navigate("Account", null)
 		val bodies = h.transport.bodies()
-		assertEquals(anonymous, bodies[1]["user_id"]!!.jsonPrimitive.content)
+		assertEquals(anonymous, bodies[1].str("pz_visitor_id"))
+		assertNull(bodies[1]["user_id"])
 		assertEquals(listOf(listOf("Product Viewed", "A1")), bodies[1].commands())
 		assertFalse(bodies[1].bool("new_session"))
 		assertEquals("dave", bodies[2].str("user_id"))
@@ -565,7 +589,8 @@ class EngineTest
 		assertEquals(mapOf("k" to "v"), h2.engine.result.value.dataFor(88))
 		h2.engine.navigate("Next", null)
 		assertEquals(r1.sessionId, h2.transport.bodies().single().str("session_id"))
-		assertEquals(h1.transport.bodies()[0]["user_id"], h2.transport.bodies()[0]["user_id"])
+		assertEquals(h1.transport.bodies()[0]["pz_visitor_id"], h2.transport.bodies()[0]["pz_visitor_id"])
+		assertNull("named before the restart", h2.transport.bodies()[0]["pz_visitor_new"])
 		assertTrue(t.seen.isNotEmpty())
 	}
 
@@ -580,7 +605,7 @@ class EngineTest
 		h2.engine.navigate("Home", null)
 		val b = h2.transport.bodies().single()
 		assertNull(b.str("session_id"))
-		assertEquals(h1.transport.bodies()[0]["user_id"], b["user_id"])
+		assertEquals(h1.transport.bodies()[0]["pz_visitor_id"], b["pz_visitor_id"])
 	}
 
 	@Test fun v1StateIsMigrated() = runTest {
@@ -594,7 +619,8 @@ class EngineTest
 		val (h, _) = trackerHarness(legacy = legacy)
 		h.engine.navigate("Home", null)
 		val b = h.transport.bodies().single()
-		assertEquals("-123456", b["user_id"]!!.jsonPrimitive.content)
+		assertEquals("-123456", b.str("pz_visitor_id"))
+		assertNull("a returning visitor", b["pz_visitor_new"])
 		assertEquals(session(T0/1000 - 60, -123456, 4), b.str("session_id"))
 		assertFalse(b.bool("new_session"))
 		assertEquals("300,200,100", b.str("past_sessions"))
@@ -610,7 +636,7 @@ class EngineTest
 		val (h, _) = trackerHarness(legacy = legacy)
 		h.engine.navigate("Home", null)
 		val b = h.transport.bodies().single()
-		assertEquals("4242", b["user_id"]!!.jsonPrimitive.content)
+		assertEquals("4242", b.str("pz_visitor_id"))
 		assertNull(b.str("session_id"))
 	}
 
@@ -729,7 +755,7 @@ class EngineTest
 		val status = h.engine.push.value
 		assertEquals(listOf<Any?>("dev:abc", visitor, true), listOf(status.token, status.registeredVisitorId, status.pushed))
 		assertTrue("registered when", status.registeredAtMs > 0)
-		assertEquals(listOf(buildJsonObject { put("user_id", visitor); put("token", "dev:abc"); put("platform", "android"); put("app_id", "com.shop.app"); put("sandbox", false); put("enabled", true) }), pushBodies(h))
+		assertEquals(listOf(buildJsonObject { put("user_id", visitor.toString()); put("token", "dev:abc"); put("platform", "android"); put("app_id", "com.shop.app"); put("sandbox", false); put("enabled", true) }), pushBodies(h))
 		assertEquals("PUT", h.transport.requests.last().method)
 		assertEquals("pushed: the background checks are few", 360L, h.engine.backgroundCheckMinutes())
 		h.engine.registerPush()
@@ -782,7 +808,7 @@ class EngineTest
 		advanceUntilIdle()
 		val after = h.engine.visitor.value.visitorId!!
 		assertTrue(before != after)
-		assertEquals(JsonPrimitive(after), pushBodies(h).last()["user_id"])
+		assertEquals(JsonPrimitive(after.toString()), pushBodies(h).last()["user_id"])
 		assertEquals(3, pushBodies(h).size)
 	}
 
@@ -816,11 +842,12 @@ class EngineTest
 	@Test fun resetIsANewVisitor() = runTest {
 		val (h, _) = trackerHarness()
 		h.engine.navigate("Home", null)
-		val before = h.transport.bodies()[0]["user_id"]
+		val before = h.transport.bodies()[0]["pz_visitor_id"]
 		h.engine.reset()
 		h.engine.navigate("Home", null)
 		val after = h.transport.bodies()[1]
-		assertTrue(before != after["user_id"])
+		assertTrue(before != after["pz_visitor_id"])
+		assertTrue("minted again: new", after.bool("pz_visitor_new"))
 		assertNull(after.str("session_id"))
 	}
 }

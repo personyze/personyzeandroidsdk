@@ -60,6 +60,7 @@ class CommandsTest
 	@Test fun notificationPathNamesTheVisitor()
 	{	assertEquals("current_notification/where/user_id=42&message_id=5", Endpoints.notification(42, 5))
 		assertEquals("current_notification/where/user_id=-7", Endpoints.notification(-7))
+		assertEquals("current_notification/where/user_id=-1520401369231049551&message_id=5", Endpoints.notification(-1520401369231049551L, 5))
 	}
 
 	@Test fun metadataPaths()

@@ -26,15 +26,16 @@ internal object Endpoints
 	 **/
 	const val PUSH_TOKEN = "push_token"
 
-	/**	The visitor's queued notification, by the visitor id - the id the server makes of `user_id`,
-		which is what field 1 of their session holds.
+	/**	The visitor's queued notification, by the visitor id - what field 1 of their session holds:
+		the install's id, or the one the server makes of `user_id`. Its decimal, at any width (SPEC
+		section 1).
 
 		v1 sent the session string instead (`session_id=`), encoded with Java's URLEncoder: `+` for a
 		space, and a comma encoded twice for a parser that decoded twice. Since the REST parser's Deno
 		port (2026-05) that answered `400 Invalid session_id`; the server now reads both. The visitor id
 		needs no encoding at all, and is all the server reads from the session here.
 	 **/
-	fun notification(visitorId: Int, messageId: Long? = null): String
+	fun notification(visitorId: Long, messageId: Long? = null): String
 	{	val sb = StringBuilder("current_notification/where/user_id=").append(visitorId)
 		if (messageId != null)
 		{	sb.append("&message_id=").append(messageId)

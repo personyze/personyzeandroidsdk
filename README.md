@@ -1,4 +1,4 @@
-# Personyze Android SDK 2.1
+# Personyze Android SDK 3.0
 
 Personalization and A/B testing for Android apps: tell [Personyze](https://www.personyze.com/) what
 the visitor does, get back the campaigns they match and the actions to present, render them, and
@@ -10,20 +10,20 @@ Kotlin, coroutines, `StateFlow`, Jetpack Compose. Replaces the 1.x Java SDK, whi
 
 | | |
 | --- | --- |
-| Artifacts | `com.personyze:personyze-android:2.1.0`, `com.personyze:personyze-android-compose:2.1.0` |
+| Artifacts | `com.personyze:personyze-android:3.0.0`, `com.personyze:personyze-android-compose:3.0.0` |
 | Android | minSdk 24; the app compiles with compileSdk 35 or later |
 | Kotlin | 2.1 or later (built with 2.2) |
 | Docs | the [Android SDK guide](https://personyze.com/wiki/mob:android-sdk-guide) and [reference](https://personyze.com/wiki/mob:android-sdk-docs) |
-| Protocol | the [tracker endpoint](https://personyze.com/wiki/guide:server-side) the SDK speaks |
+| Protocol | the [tracker endpoint](https://personyze.com/wiki/guide:server-side) the SDK speaks, protocol 2: 64-bit visitor ids |
 
 ## Install
 
 ```kotlin
 // app/build.gradle.kts
 dependencies {
-	implementation("com.personyze:personyze-android:2.1.0")
+	implementation("com.personyze:personyze-android:3.0.0")
 	// only to render actions in Jetpack Compose:
-	implementation("com.personyze:personyze-android-compose:2.1.0")
+	implementation("com.personyze:personyze-android-compose:3.0.0")
 }
 ```
 
@@ -40,14 +40,15 @@ The SDK declares `INTERNET` and `ACCESS_NETWORK_STATE`. For notifications the ap
 class App : Application()
 {	override fun onCreate()
 	{	super.onCreate()
-		Personyze.initialize(this, PersonyzeConfig("YOUR_API_KEY"))
+		Personyze.initialize(this, PersonyzeConfig("YOUR_APP_KEY"))
 	}
 }
 ```
 
 Initialize in `Application.onCreate`, not in an activity: the SDK never stores the key, and its
 background work (sending queued events, checking notifications) runs only in a process the app
-initialized. The key is in Personyze's Settings > Integrations > Full-featured API.
+initialized. We recommend your App key: the setup step of an API & SDK Personalization campaign fills it in, or see
+Personyze's Settings > Integrations > App push. It is made to ship inside an app, and can only do what the SDK does.
 
 Then, once each time the visitor opens a screen:
 
@@ -156,6 +157,25 @@ lasts 90 minutes from its start; `startNewSession()` starts one now. `Personyze.
 `StateFlow` of the visitor and the session. `reset()` makes a new anonymous visitor and deletes
 everything stored (a privacy request).
 
+### 64-bit visitor ids (3.0)
+
+Personyze's visitor ids are 64-bit numbers on an account that mints them, so
+`PersonyzeVisitor.visitorId` and `PersonyzePushStatus.registeredVisitorId` are `Long?` since 3.0
+(`Int?` before). Keep an id as a `Long` or as its decimal text - never through a `Double`, or a JSON
+library's default number, which past 2^53 is another visitor's id.
+
+The SDK speaks protocol 2 of the tracker endpoint: the install's anonymous visitor goes as Personyze's
+own id, at any width; your `setUserId` id goes as before, so a logged-in visitor stays who they were.
+The first run mints a 32-bit id, which Personyze upgrades to 64 bits where the account mints them; the
+SDK keeps the id Personyze answers, with its session, and mints the next visitor (`reset()`) at the
+width the account last said. So `Personyze.visitor.value.visitorId` is null on a new install, and after
+`reset()`, until Personyze's first answer, and changes once more only if Personyze gives the install another id: link it
+to your own records once it is set, and again if it changes.
+
+**Going back to 2.x splits visitors.** 2.x reads ten digits at most: on a device that holds a 64-bit
+visitor it finds none, and mints a new visitor - the same person counted twice, their history and A/B
+arms left behind. Upgrade, don't downgrade; a 3.0 build needs Personyze's servers of 2026-11 or later.
+
 ## Notifications
 
 "Web Push Send" actions reach the app as notifications. In the manifest:
@@ -167,7 +187,7 @@ everything stored (a privacy request).
 ask for it at runtime on Android 13+, and turn them on:
 
 ```kotlin
-Personyze.initialize(this, PersonyzeConfig("YOUR_API_KEY") { notifications = true })
+Personyze.initialize(this, PersonyzeConfig("YOUR_APP_KEY") { notifications = true })
 ```
 
 The SDK checks as the app comes to the front (once a minute at most) and every 15 minutes in the
@@ -246,7 +266,7 @@ right settings screen).
 * Nothing the server answers is thrown. `onError` hears about everything:
 
 ```kotlin
-PersonyzeConfig("YOUR_API_KEY") {
+PersonyzeConfig("YOUR_APP_KEY") {
 	onError = PersonyzeErrorListener { error, context -> Log.w("App", "${context.operation}: ${error.message}") }
 }
 ```
@@ -270,7 +290,7 @@ PersonyzeConfig("YOUR_API_KEY") {
 
 ## Migrating from 1.x
 
-| 1.x | 2.0 |
+| 1.x | 2.0 and later |
 | --- | --- |
 | `PersonyzeTracker.inst.initialize(context, key)` | `Personyze.initialize(this, PersonyzeConfig(key))`, in `Application.onCreate` |
 | `initialize(context, key, true)` | `PersonyzeConfig(key) { notifications = true }`, and declare `POST_NOTIFICATIONS` |
@@ -330,4 +350,5 @@ only a new version fixes it.
 The engine (`internal/core`) is plain Kotlin and runs on the JVM; Android is in `internal/android`
 and the views.
 
-The API key ships inside every APK, as with 1.x: treat it as known to anyone who unpacks the app.
+The key ships inside every APK, as with 1.x: treat it as known to anyone who unpacks the app. That is why we recommend
+the App key, which can only do what the SDK does (it needs this SDK, 2.0 or later).

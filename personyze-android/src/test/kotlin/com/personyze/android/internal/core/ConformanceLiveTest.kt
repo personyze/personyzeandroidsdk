@@ -8,9 +8,13 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.jsonObject
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -21,6 +25,9 @@ import kotlin.random.Random
 
 /**	SPEC section 9 against the real endpoint - every port's golden path. Skipped without
 	`PERSONYZE_API_KEY` (account 1, the test account). Writes to that account, like the other ports'.
+	Steps 9 and 10 need a server that speaks protocol 2 (app-service since P7, 2026-11) and an account
+	that mints 64-bit visitor ids - account 1 does since 2026-11-17. Step 11 is for ports that hand the
+	visit to the tag (section 10.1); an app has no tag.
 
 	```
 	PERSONYZE_API_KEY=$(cat key-file) ./gradlew :personyze-android:testDebugUnitTest --tests '*ConformanceLiveTest*'
@@ -45,13 +52,25 @@ class ConformanceLiveTest
 		override fun log(message: String) = println(message)
 	}
 
-	private fun engine(apiKey: String = key!!, base: String = baseUrl, store: Store = MemoryStore(), timeoutMs: Long = 10_000): Engine =
+	/**	The real transport, keeping each tracker request's body: what the SDK sent, beside what came back. **/
+	private class Recorder(private val inner: Transport = OkHttpTransport(null) { true }) : Transport
+	{	val bodies: MutableList<JsonObject> = Collections.synchronizedList(ArrayList())
+
+		override suspend fun execute(request: HttpRequest, timeoutMs: Long): HttpOutcome
+		{	if (request.url.endsWith("/rest/tracker-v1") && request.body != null)
+			{	bodies.add(Wire.json.parseToJsonElement(request.body).jsonObject)
+			}
+			return inner.execute(request, timeoutMs)
+		}
+	}
+
+	private fun engine(apiKey: String = key!!, base: String = baseUrl, store: Store = MemoryStore(), timeoutMs: Long = 10_000, transport: Transport = OkHttpTransport(null) { true }): Engine =
 		Engine(
 			EngineConfig(apiKey, base, "https://counter.personyze.com/", timeoutMs, 15_000, 1, null, "personyze-android/conformance"),
 			RealPlatform(),
 			store,
 			MemoryStore(),
-			OkHttpTransport(null) { true },
+			transport,
 			scope,
 			Dispatchers.IO,
 			null,
@@ -138,7 +157,76 @@ class ConformanceLiveTest
 		assertEquals(Session.serverUserId(b)!!.toLong(), Session.visitor(rb.sessionId))
 	}
 
-	/**	Beyond the eight: the templates of what was decided, and the notification endpoint, answer
+	private fun answer(r: com.personyze.android.PersonyzeResult): JsonObject = Wire.json.parseToJsonElement(r.rawJson!!).jsonObject
+
+	private fun JsonObject.text(name: String): String? = (this[name] as? JsonPrimitive)?.content
+
+	private fun fits32(id: Long): Boolean = id >= Int.MIN_VALUE && id <= Int.MAX_VALUE
+
+	/**	Step 9: a 64-bit visitor is kept, exactly. The account answers first (`id_bits: 64`), so the
+		visitor a reset mints next is minted at 64 bits; the answer keeps it as it was sent, field 1 of
+		the session is that id to the digit, and a second decision keeps it in one session.
+	 **/
+	@Test fun step9_a64BitVisitorIsKeptExactly() = runBlocking<Unit> {
+		assumeTrue("PERSONYZE_API_KEY not set", key != null)
+		val recorder = Recorder()
+		val e = engine(transport = recorder)
+		val heard = e.navigate("androidsdk-conformance/home", null)
+		assertNull(heard.error)
+		assertEquals("the account mints 64-bit ids", "64", answer(heard).text("id_bits"))
+		e.reset()
+		assertNull("no visitor id until an answer names it", e.visitor.value.visitorId)
+		val first = e.navigate("androidsdk-conformance/home", null)
+		assertNull(first.error)
+		val sent = recorder.bodies.last()
+		val minted = sent.text("pz_visitor_id")!!.toLong()
+		assertFalse("minted at 64 bits once the account said so: $minted", fits32(minted))
+		assertEquals(JsonPrimitive(true), sent["pz_visitor_new"])
+		assertEquals("64", answer(first).text("id_bits"))
+		assertEquals("kept as it was sent", minted.toString(), answer(first).text("pz_visitor_id"))
+		assertEquals(minted, Session.visitor(first.sessionId))
+		val second = e.navigate("androidsdk-conformance/product", null)
+		assertNull(second.error)
+		assertEquals(minted, Session.visitor(second.sessionId))
+		assertEquals(Session.startTime(first.sessionId), Session.startTime(second.sessionId))
+		assertEquals(1, Session.counter(second.sessionId))
+		assertNull("named: no longer new", recorder.bodies.last()["pz_visitor_new"])
+		assertEquals(minted, e.visitor.value.visitorId)
+	}
+
+	/**	Step 10: a new 32-bit id is upgraded and adopted. A store that has heard nothing mints 32 bits,
+		new; the account answers a 64-bit `pz_visitor_id`, which the next request sends beside the
+		session that came with it - and the session goes on.
+	 **/
+	@Test fun step10_aNew32BitIdIsUpgradedAndAdopted() = runBlocking<Unit> {
+		assumeTrue("PERSONYZE_API_KEY not set", key != null)
+		val recorder = Recorder()
+		val e = engine(transport = recorder)
+		val first = e.navigate("androidsdk-conformance/home", null)
+		assertNull(first.error)
+		val sent = recorder.bodies.single()
+		val minted = sent.text("pz_visitor_id")!!.toLong()
+		assertTrue("the first run mints 32 bits: $minted", minted in 500_000_000L..Int.MAX_VALUE.toLong())
+		assertEquals(JsonPrimitive(true), sent["pz_visitor_new"])
+		val adopted = answer(first).text("pz_visitor_id")!!
+		assertNotEquals(minted.toString(), adopted)
+		assertFalse("upgraded to 64 bits: $adopted", fits32(adopted.toLong()))
+		assertEquals(adopted.toLong(), Session.visitor(first.sessionId))
+		assertEquals(adopted.toLong(), e.visitor.value.visitorId)
+		val second = e.navigate("androidsdk-conformance/product", null)
+		assertNull(second.error)
+		val next = recorder.bodies[1]
+		assertEquals(JsonPrimitive(adopted), next["pz_visitor_id"])
+		assertNull(next["pz_visitor_new"])
+		assertEquals("beside the session it came with", first.sessionId, next.text("session_id"))
+		assertEquals(JsonPrimitive(false), next["new_session"])
+		assertEquals(adopted, answer(second).text("pz_visitor_id"))
+		assertEquals(adopted.toLong(), Session.visitor(second.sessionId))
+		assertEquals(Session.startTime(first.sessionId), Session.startTime(second.sessionId))
+		assertEquals(1, Session.counter(second.sessionId))
+	}
+
+	/**	Beyond the steps: the templates of what was decided, and the notification endpoint, answer
 		without error.
 	 **/
 	@Test fun extras_templatesAndNotifications() = runBlocking<Unit> {

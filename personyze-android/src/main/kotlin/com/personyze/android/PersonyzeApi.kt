@@ -111,12 +111,18 @@ public sealed interface PersonyzeApi : PersonyzeEvents
 	 **/
 	public suspend fun navigate(document: String, events: (PersonyzeEvents.() -> Unit)? = null): PersonyzeResult
 
-	/**	Send what is queued and answer the current decision, merged with what the response
-		changed. With nothing queued it answers the current decision without a request.
+	/**	Send what can go of the queue and answer the current decision, merged with what the response
+		changed. Events that wait for a navigation ([flush] says when) stay queued: with nothing else
+		to send and a decision already there, it answers that decision without a request, and with no
+		[PersonyzeResult.error].
 	 **/
 	public suspend fun refresh(): PersonyzeResult
 
-	/**	Send what is queued now instead of waiting for the automatic send. **/
+	/**	Send what is queued now instead of waiting for the automatic send. Events of a visitor with no
+		live session wait for the next [navigate] all the same - on a new install, after [reset], after
+		a login or a logout ([setUserId]), once the session expired or after [startNewSession]: sent
+		alone they have no page view to belong to, and Personyze does not log them.
+	 **/
 	public suspend fun flush()
 
 	/**	Identify the visitor with your own user id (after login). Personyze files them under it from
@@ -128,7 +134,9 @@ public sealed interface PersonyzeApi : PersonyzeEvents
 	public fun setUserId(userId: Long)
 
 	/**	Start a new Personyze session on the next request. A session otherwise ends 90 minutes
-		after it started.
+		after it started. Events queued before it go into the session that is ending while that one is
+		live; once it is not, they are not sent, and [PersonyzeConfig.onError] hears of them
+		([PersonyzeException.Delivery.Reason.OTHER_SESSION]).
 	 **/
 	public fun startNewSession()
 
